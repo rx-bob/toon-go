@@ -102,6 +102,13 @@ func (s *encodeState) encodeObject(obj Object, depth int) error {
 	if depth == 0 && obj.IsEmpty() {
 		return nil
 	}
+	if depth == 0 {
+		if ok, err := s.encodeKeyedObject(obj, "", depth, false); err != nil {
+			return err
+		} else if ok {
+			return nil
+		}
+	}
 	indent := s.indent(depth)
 	for _, field := range obj.Fields {
 		switch val := field.Value.(type) {
@@ -123,6 +130,11 @@ func (s *encodeState) encodeObject(obj Object, depth int) error {
 			keyLiteral, err := encodeKey(field.Key)
 			if err != nil {
 				return err
+			}
+			if ok, err := s.encodeKeyedObject(val, keyLiteral, depth, false); err != nil {
+				return err
+			} else if ok {
+				continue
 			}
 			s.emit(indent + keyLiteral + ":")
 			if err := s.encodeObject(val, depth+1); err != nil {
@@ -297,8 +309,73 @@ func (s *encodeState) encodeObjectListItem(obj Object, depth int, ctx formatCont
 		}
 		return nil
 	}
+	if keyed, ok := first.Value.(Object); ok {
+		keyLiteral, err := encodeKey(first.Key)
+		if err != nil {
+			return err
+		}
+		if emitted, err := s.encodeKeyedObject(keyed, keyLiteral, depth, true); err != nil {
+			return err
+		} else if emitted {
+			if len(obj.Fields) > 1 {
+				if err := s.encodeObject(Object{Fields: obj.Fields[1:]}, depth+1); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+	}
 	s.emit(s.indent(depth) + "-")
 	return s.encodeObject(obj, depth+1)
+}
+
+func (s *encodeState) encodeKeyedObject(obj Object, keyLiteral string, depth int, listItem bool) (bool, error) {
+	if len(obj.Fields) < 2 {
+		return false, nil
+	}
+	entries := make([]normalizedValue, len(obj.Fields))
+	for i, field := range obj.Fields {
+		entry, ok := field.Value.(Object)
+		if !ok || entry.IsEmpty() {
+			return false, nil
+		}
+		entries[i] = entry
+	}
+	fields, ok := detectTabular(entries)
+	if !ok {
+		return false, nil
+	}
+	header := renderKeyedHeader(keyLiteral, len(entries), s.cfg.delimiter, fields)
+	if listItem {
+		s.emit(s.indent(depth) + "- " + header)
+	} else {
+		s.emit(s.indent(depth) + header)
+	}
+	rowDepth := depth + 1
+	if listItem {
+		rowDepth++
+	}
+	for i, field := range obj.Fields {
+		entryKey, err := encodeKey(field.Key)
+		if err != nil {
+			return false, err
+		}
+		entry := entries[i].(Object)
+		cells := make([]string, 0)
+		for _, value := range flattenObjectValues(entry, fields) {
+			token, err := formatPrimitive(value, formatContext{
+				active:   s.cfg.delimiter,
+				document: s.cfg.delimiter,
+				inArray:  true,
+			})
+			if err != nil {
+				return false, err
+			}
+			cells = append(cells, token)
+		}
+		s.emit(s.indent(rowDepth) + entryKey + ": " + strings.Join(cells, string(s.cfg.delimiter.rune())))
+	}
+	return true, nil
 }
 
 func (s *encodeState) encodeArrayForObjectListItem(keyLiteral string, values []normalizedValue, depth int, ctx formatContext) error {
@@ -522,6 +599,16 @@ func renderHeader(keyLiteral string, length int, delimiter Delimiter, _ bool, fi
 	}
 	b.WriteByte(':')
 	return b.String()
+}
+
+func renderKeyedHeader(keyLiteral string, length int, delimiter Delimiter, fields []fieldNode) string {
+	header := renderHeader(keyLiteral, length, delimiter, false, fields)
+	open := strings.IndexByte(header, '[')
+	close := strings.IndexByte(header[open+1:], ']') + open + 1
+	if delimiter == DelimiterComma {
+		return header[:close] + ":" + header[close:]
+	}
+	return header[:close-1] + ":" + header[close-1:]
 }
 
 func writeFieldNode(b *strings.Builder, field fieldNode, delimiter Delimiter) {
