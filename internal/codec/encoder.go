@@ -189,9 +189,9 @@ func (s *encodeState) encodeArray(key string, values []normalizedValue, depth in
 		for _, row := range values {
 			obj := row.(Object)
 			rowLine := s.indent(depth + 1)
-			rowValues := make([]string, 0, len(fields))
-			for _, field := range fields {
-				token, err := formatPrimitive(objField(obj, field), ctx)
+			rowValues := make([]string, 0)
+			for _, field := range flattenObjectValues(obj, fields) {
+				token, err := formatPrimitive(field, ctx)
 				if err != nil {
 					return err
 				}
@@ -311,9 +311,9 @@ func (s *encodeState) encodeArrayForObjectListItem(keyLiteral string, values []n
 		for _, row := range values {
 			obj := row.(Object)
 			rowLine := s.indent(depth + 1)
-			rowValues := make([]string, 0, len(fields))
-			for _, field := range fields {
-				token, err := formatPrimitive(objField(obj, field), ctx)
+			rowValues := make([]string, 0)
+			for _, field := range flattenObjectValues(obj, fields) {
+				token, err := formatPrimitive(field, ctx)
 				if err != nil {
 					return err
 				}
@@ -360,7 +360,7 @@ func (s *encodeState) encodeArrayForObjectListItem(keyLiteral string, values []n
 	return nil
 }
 
-func detectTabular(values []normalizedValue) ([]string, bool) {
+func detectTabular(values []normalizedValue) ([]fieldNode, bool) {
 	if len(values) == 0 {
 		return nil, false
 	}
@@ -368,13 +368,21 @@ func detectTabular(values []normalizedValue) ([]string, bool) {
 	if !ok || first.IsEmpty() {
 		return nil, false
 	}
-	fields := make([]string, len(first.Fields))
+	fields := make([]fieldNode, len(first.Fields))
 	fieldSet := make(map[string]struct{}, len(first.Fields))
 	for i, field := range first.Fields {
-		if !isPrimitive(field.Value) {
+		column := make([]normalizedValue, 0, len(values))
+		for _, value := range values {
+			obj, rowOK := value.(Object)
+			if !rowOK {
+				return nil, false
+			}
+			column = append(column, objField(obj, field.Key))
+		}
+		fields[i], ok = detectFieldNode(field.Key, field.Value, column)
+		if !ok {
 			return nil, false
 		}
-		fields[i] = field.Key
 		fieldSet[field.Key] = struct{}{}
 	}
 	for _, value := range values[1:] {
@@ -387,7 +395,7 @@ func detectTabular(values []normalizedValue) ([]string, bool) {
 		}
 		seen := make(map[string]struct{}, len(fields))
 		for _, field := range obj.Fields {
-			if _, ok := fieldSet[field.Key]; !ok || !isPrimitive(field.Value) {
+			if _, ok := fieldSet[field.Key]; !ok {
 				return nil, false
 			}
 			seen[field.Key] = struct{}{}
@@ -397,6 +405,71 @@ func detectTabular(values []normalizedValue) ([]string, bool) {
 		}
 	}
 	return fields, true
+}
+
+func detectFieldNode(name string, firstValue normalizedValue, rows []normalizedValue) (fieldNode, bool) {
+	if isPrimitive(firstValue) {
+		for _, value := range rows {
+			if !isPrimitive(value) {
+				return fieldNode{}, false
+			}
+		}
+		return fieldNode{name: name}, true
+	}
+
+	firstObject, ok := firstValue.(Object)
+	if !ok || firstObject.IsEmpty() {
+		return fieldNode{}, false
+	}
+	children := make([]fieldNode, len(firstObject.Fields))
+	childSet := make(map[string]struct{}, len(firstObject.Fields))
+	for i, child := range firstObject.Fields {
+		childRows := make([]normalizedValue, 0, len(rows))
+		for _, value := range rows {
+			obj, ok := value.(Object)
+			if !ok {
+				return fieldNode{}, false
+			}
+			if obj.IsEmpty() {
+				return fieldNode{}, false
+			}
+			childRows = append(childRows, objField(obj, child.Key))
+		}
+		children[i], ok = detectFieldNode(child.Key, child.Value, childRows)
+		if !ok {
+			return fieldNode{}, false
+		}
+		childSet[child.Key] = struct{}{}
+	}
+	for _, value := range rows {
+		obj, ok := value.(Object)
+		if !ok {
+			return fieldNode{}, false
+		}
+		if len(obj.Fields) != len(childSet) {
+			return fieldNode{}, false
+		}
+		for _, child := range obj.Fields {
+			if _, ok := childSet[child.Key]; !ok {
+				return fieldNode{}, false
+			}
+		}
+	}
+	return fieldNode{name: name, children: children}, true
+}
+
+func flattenObjectValues(obj Object, fields []fieldNode) []normalizedValue {
+	values := make([]normalizedValue, 0)
+	for _, field := range fields {
+		value := objField(obj, field.name)
+		if len(field.children) == 0 {
+			values = append(values, value)
+			continue
+		}
+		nested, _ := value.(Object)
+		values = append(values, flattenObjectValues(nested, field.children)...)
+	}
+	return values
 }
 
 func objField(obj Object, key string) normalizedValue {
@@ -426,7 +499,7 @@ func isPrimitiveArray(values []normalizedValue) bool {
 	return true
 }
 
-func renderHeader(keyLiteral string, length int, delimiter Delimiter, _ bool, fields []string) string {
+func renderHeader(keyLiteral string, length int, delimiter Delimiter, _ bool, fields []fieldNode) string {
 	var b strings.Builder
 	if keyLiteral != "" {
 		b.WriteString(keyLiteral)
@@ -443,11 +516,26 @@ func renderHeader(keyLiteral string, length int, delimiter Delimiter, _ bool, fi
 			if i > 0 {
 				b.WriteRune(delimiter.rune())
 			}
-			fieldLiteral, _ := encodeKey(field)
-			b.WriteString(fieldLiteral)
+			writeFieldNode(&b, field, delimiter)
 		}
 		b.WriteByte('}')
 	}
 	b.WriteByte(':')
 	return b.String()
+}
+
+func writeFieldNode(b *strings.Builder, field fieldNode, delimiter Delimiter) {
+	fieldLiteral, _ := encodeKey(field.name)
+	b.WriteString(fieldLiteral)
+	if len(field.children) == 0 {
+		return
+	}
+	b.WriteByte('{')
+	for i, child := range field.children {
+		if i > 0 {
+			b.WriteRune(delimiter.rune())
+		}
+		writeFieldNode(b, child, delimiter)
+	}
+	b.WriteByte('}')
 }
