@@ -404,6 +404,9 @@ func (p *parser) parseArray(header parsedHeader, depth int) (any, error) {
 			if !ok {
 				return nil, errorAt(line.number, "invalid array header in list item")
 			}
+			if len(itemHeader.fieldTree) > 0 && !itemHeader.keyPresent {
+				return nil, errorAt(line.number, "keyless fields-bearing header is not valid in a list item")
+			}
 			itemValue, err := p.parseArray(itemHeader, depth+1)
 			if err != nil {
 				return nil, err
@@ -557,6 +560,14 @@ func (p *parser) collectObjectListSiblings(obj map[string]any, depth int) error 
 
 func (p *parser) parseHeader(line parsedLine) (parsedHeader, bool, error) {
 	header, ok, err := tryParseHeader(line.content)
+	if err != nil && !p.cfg.strict {
+		return parsedHeader{}, false, nil
+	}
+	if ok && p.cfg.strict {
+		if err := validateFieldTree(header.fieldTree); err != nil {
+			return parsedHeader{}, false, errorWrap(line.number, err)
+		}
+	}
 	if ok {
 		header.sourceLine = line.number
 	}
@@ -576,8 +587,12 @@ type parsedHeader struct {
 }
 
 func tryParseHeader(content string) (parsedHeader, bool, error) {
+	colonBeforeBracket := indexOutsideQuotes(content, ':')
 	bracketStart := indexOutsideQuotes(content, '[')
 	if bracketStart == -1 {
+		return parsedHeader{}, false, nil
+	}
+	if colonBeforeBracket >= 0 && colonBeforeBracket < bracketStart {
 		return parsedHeader{}, false, nil
 	}
 	bracketEnd := matchingBracket(content, bracketStart)
@@ -586,13 +601,23 @@ func tryParseHeader(content string) (parsedHeader, bool, error) {
 	}
 	colon := indexOutsideQuotesFrom(content, ':', bracketEnd+1)
 	if colon == -1 {
-		return parsedHeader{}, false, nil
+		if trimSpaces(content) == "[]" {
+			return parsedHeader{}, false, nil
+		}
+		return parsedHeader{}, false, errors.New("missing colon after array header")
 	}
-	left := trimSpaces(content[:colon])
 	right := trimSpaces(content[colon+1:])
-	keyPart := trimSpaces(left[:bracketStart])
+	rawKeyPart := content[:bracketStart]
+	keyPart := trimSpaces(rawKeyPart)
+	if keyPart != "" && len(rawKeyPart) > 0 && (rawKeyPart[len(rawKeyPart)-1] == ' ' || rawKeyPart[len(rawKeyPart)-1] == '\t') {
+		return parsedHeader{}, false, errors.New("whitespace between key and array bracket")
+	}
 	bracketSegment := content[bracketStart+1 : bracketEnd]
-	fieldSegment := trimSpaces(content[bracketEnd+1 : colon])
+	rawFieldSegment := content[bracketEnd+1 : colon]
+	if rawFieldSegment != "" && rawFieldSegment[0] != '{' {
+		return parsedHeader{}, false, errors.New("content between array bracket and colon")
+	}
+	fieldSegment := rawFieldSegment
 
 	header := parsedHeader{
 		key:        "",
@@ -627,6 +652,12 @@ func tryParseHeader(content string) (parsedHeader, bool, error) {
 		}
 		header.fieldTree = fields
 		header.leafFields = flattenFields(fields)
+	}
+	if len(header.fieldTree) > 0 && right != "" {
+		return parsedHeader{}, false, errors.New("content after fields-bearing header")
+	}
+	if header.keyed && len(header.fieldTree) == 0 {
+		return parsedHeader{}, false, errors.New("keyed header requires a field list")
 	}
 
 	header.inlineValues = right
@@ -863,12 +894,48 @@ func decodeKeyToken(token string) (string, error) {
 		return "", errors.New("empty key")
 	}
 	if token[0] == '"' {
+		if closingQuote(token) != len(token)-1 {
+			return "", errors.New("content after quoted key")
+		}
 		return parsepkg.UnquoteString(token)
 	}
-	if !formatpkg.IsValidUnquotedKey(token) {
-		return "", fmt.Errorf("invalid unquoted key %q", token)
-	}
+	// Decoder keys are literal tokens. The encoder's stricter unquoted-key
+	// pattern does not constrain accepted input.
 	return token, nil
+}
+
+func closingQuote(token string) int {
+	escaped := false
+	for i := 1; i < len(token); i++ {
+		if escaped {
+			escaped = false
+			continue
+		}
+		if token[i] == '\\' {
+			escaped = true
+			continue
+		}
+		if token[i] == '"' {
+			return i
+		}
+	}
+	return -1
+}
+
+func validateFieldTree(fields []fieldNode) error {
+	seen := make(map[string]struct{}, len(fields))
+	for _, field := range fields {
+		if _, exists := seen[field.name]; exists {
+			return fmt.Errorf("duplicate field name %q", field.name)
+		}
+		seen[field.name] = struct{}{}
+	}
+	for _, field := range fields {
+		if err := validateFieldTree(field.children); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func decodePrimitiveToken(token string) (any, error) {
@@ -876,6 +943,9 @@ func decodePrimitiveToken(token string) (any, error) {
 		return "", nil
 	}
 	if token[0] == '"' {
+		if closingQuote(token) != len(token)-1 {
+			return nil, errors.New("content after quoted string")
+		}
 		return parsepkg.UnquoteString(token)
 	}
 	switch token {
