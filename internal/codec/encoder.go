@@ -325,8 +325,22 @@ func (s *encodeState) encodeObjectListItem(obj Object, depth int, ctx formatCont
 			return nil
 		}
 	}
+	if nested, ok := first.Value.(Object); ok {
+		keyLiteral, err := encodeKey(first.Key)
+		if err != nil {
+			return err
+		}
+		s.emit(s.indent(depth) + "- " + keyLiteral + ":")
+		if err := s.encodeObject(nested, depth+2); err != nil {
+			return err
+		}
+		if len(obj.Fields) > 1 {
+			return s.encodeObject(Object{Fields: obj.Fields[1:]}, depth+1)
+		}
+		return nil
+	}
 	s.emit(s.indent(depth) + "-")
-	return s.encodeObject(obj, depth+1)
+	return nil
 }
 
 func (s *encodeState) encodeKeyedObject(obj Object, keyLiteral string, depth int, listItem bool) (bool, error) {
@@ -387,7 +401,7 @@ func (s *encodeState) encodeArrayForObjectListItem(keyLiteral string, values []n
 		s.emit(indent + "- " + header)
 		for _, row := range values {
 			obj := row.(Object)
-			rowLine := s.indent(depth + 1)
+			rowLine := s.indent(depth + 2)
 			rowValues := make([]string, 0)
 			for _, field := range flattenObjectValues(obj, fields) {
 				token, err := formatPrimitive(field, ctx)
@@ -430,7 +444,7 @@ func (s *encodeState) encodeArrayForObjectListItem(keyLiteral string, values []n
 	header := renderHeader(keyLiteral, len(values), delimiter, false, nil)
 	s.emit(indent + "- " + header)
 	for _, item := range values {
-		if err := s.encodeListItem(item, depth+1, ctx); err != nil {
+		if err := s.encodeListItem(item, depth+2, ctx); err != nil {
 			return err
 		}
 	}
