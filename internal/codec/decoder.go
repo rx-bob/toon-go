@@ -641,17 +641,7 @@ func decodePrimitiveToken(token string) (any, error) {
 	case "null":
 		return nil, nil
 	}
-	if hasForbiddenLeadingZeros(token) {
-		return token, nil
-	}
-	if formatpkg.LooksNumeric(token) {
-		num, err := strconv.ParseFloat(token, 64)
-		if err != nil {
-			return nil, err
-		}
-		if num == 0 {
-			num = 0
-		}
+	if num, ok := formatpkg.ParseNumber(token); ok {
 		return num, nil
 	}
 	return token, nil
