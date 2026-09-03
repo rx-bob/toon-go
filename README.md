@@ -106,6 +106,15 @@ func main() {
 
 For more runnable samples, explore the programs in `./examples`.
 
+### Numeric policy
+
+`json.Number` values are compared as exact decimal values before encoding. Values
+that are exactly representable as `float64` use canonical formatting; large
+integers, precise decimals, and out-of-range exponents retain their valid
+numeric lexeme instead of being rounded. Invalid `json.Number` lexemes are
+encoded as strings. Native integers outside the safe `float64` integer range
+remain strings for lossless decoding.
+
 ## Resources
 
 - [TOON Specification](https://github.com/toon-format/spec/blob/main/SPEC.md)
