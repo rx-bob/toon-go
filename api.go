@@ -71,6 +71,11 @@ func WithDocumentDelimiter(delimiter Delimiter) EncoderOption {
 	return codec.WithDocumentDelimiter(delimiter)
 }
 
+// WithDelimiter configures the delimiter used by all array scopes.
+func WithDelimiter(delimiter Delimiter) EncoderOption {
+	return codec.WithDelimiter(delimiter)
+}
+
 // WithArrayDelimiter configures the default delimiter declared for arrays that
 // do not explicitly override the active delimiter.
 func WithArrayDelimiter(delimiter Delimiter) EncoderOption {
