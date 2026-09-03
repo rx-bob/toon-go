@@ -237,6 +237,7 @@ func (p *parser) finishRoot(value any) (any, error) {
 
 func (p *parser) parseObject(depth int) (map[string]any, error) {
 	result := make(map[string]any)
+	seen := make(map[string]struct{})
 	for p.pos < len(p.lines) {
 		line := p.current()
 		if line.blank {
@@ -262,7 +263,9 @@ func (p *parser) parseObject(depth int) (map[string]any, error) {
 			if err != nil {
 				return nil, err
 			}
-			result[header.key] = value
+			if err := p.setObjectField(result, seen, header.key, value, line.number); err != nil {
+				return nil, err
+			}
 			continue
 		}
 
@@ -276,17 +279,35 @@ func (p *parser) parseObject(depth int) (map[string]any, error) {
 			if err != nil {
 				return nil, err
 			}
-			result[key] = nextValue
+			if err := p.setObjectField(result, seen, key, nextValue, line.number); err != nil {
+				return nil, err
+			}
 			continue
 		}
 
-		value, err := decodePrimitiveToken(rest)
-		if err != nil {
-			return nil, errorWrap(line.number, err)
+		var value any
+		if rest == "[]" {
+			value = []any{}
+		} else {
+			value, err = decodePrimitiveToken(rest)
+			if err != nil {
+				return nil, errorWrap(line.number, err)
+			}
 		}
-		result[key] = value
+		if err := p.setObjectField(result, seen, key, value, line.number); err != nil {
+			return nil, err
+		}
 	}
 	return result, nil
+}
+
+func (p *parser) setObjectField(obj map[string]any, seen map[string]struct{}, key string, value any, line int) error {
+	if _, exists := seen[key]; exists && p.cfg.strict {
+		return errorAtf(line, "duplicate object key %q", key)
+	}
+	seen[key] = struct{}{}
+	obj[key] = value
+	return nil
 }
 
 func (p *parser) parseArray(header parsedHeader, depth int) (any, error) {
@@ -313,7 +334,7 @@ func (p *parser) parseArray(header parsedHeader, depth int) (any, error) {
 	}
 
 	if len(header.leafFields) > 0 {
-		rows := make([]any, 0, header.length)
+		rows := make([]any, 0)
 		for p.pos < len(p.lines) {
 			line := p.current()
 			if line.blank {
@@ -366,7 +387,7 @@ func (p *parser) parseArray(header parsedHeader, depth int) (any, error) {
 		return rows, nil
 	}
 
-	values = make([]any, 0, header.length)
+	values = make([]any, 0)
 	for p.pos < len(p.lines) {
 		line := p.current()
 		if line.blank {
@@ -504,6 +525,10 @@ func (p *parser) nextNonBlankIndent(from int) (int, bool) {
 }
 
 func (p *parser) collectObjectListSiblings(obj map[string]any, depth int) error {
+	seen := make(map[string]struct{}, len(obj))
+	for key := range obj {
+		seen[key] = struct{}{}
+	}
 	for p.pos < len(p.lines) {
 		next := p.current()
 		if next.blank {
@@ -533,7 +558,9 @@ func (p *parser) collectObjectListSiblings(obj map[string]any, depth int) error 
 			if !header.keyPresent {
 				return errorAt(next.number, "arrays within objects must have a key")
 			}
-			obj[header.key] = value
+			if err := p.setObjectField(obj, seen, header.key, value, next.number); err != nil {
+				return err
+			}
 			continue
 		}
 		key, rest, err := splitKeyValue(next.content)
@@ -546,13 +573,22 @@ func (p *parser) collectObjectListSiblings(obj map[string]any, depth int) error 
 			if err != nil {
 				return err
 			}
-			obj[key] = nested
-		} else {
-			value, err := decodePrimitiveToken(rest)
-			if err != nil {
-				return errorWrap(next.number, err)
+			if err := p.setObjectField(obj, seen, key, nested, next.number); err != nil {
+				return err
 			}
-			obj[key] = value
+		} else {
+			var value any
+			if rest == "[]" {
+				value = []any{}
+			} else {
+				value, err = decodePrimitiveToken(rest)
+				if err != nil {
+					return errorWrap(next.number, err)
+				}
+			}
+			if err := p.setObjectField(obj, seen, key, value, next.number); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
