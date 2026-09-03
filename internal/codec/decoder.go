@@ -358,7 +358,9 @@ func (p *parser) parseArray(header parsedHeader, depth int) (any, error) {
 				return nil, errorAt(line.number, "invalid indentation for tabular row")
 			}
 			trimmed := trimSpaces(line.content)
-			if indexOutsideQuotes(trimmed, ':') != -1 {
+			colon := indexOutsideQuotes(trimmed, ':')
+			separator := indexOutsideQuotes(trimmed, delimiter)
+			if colon >= 0 && (separator < 0 || colon < separator) {
 				break
 			}
 			p.pos++
@@ -369,16 +371,9 @@ func (p *parser) parseArray(header parsedHeader, depth int) (any, error) {
 			if ctx.strict && len(raw) != len(header.leafFields) {
 				return nil, errorAt(line.number, "tabular row width mismatch")
 			}
-			row := make(map[string]any, len(header.leafFields))
-			for idx, field := range header.leafFields {
-				if idx >= len(raw) {
-					break
-				}
-				value, err := decodePrimitiveToken(raw[idx])
-				if err != nil {
-					return nil, errorWrap(line.number, err)
-				}
-				row[field] = value
+			row, err := decodeTabularRow(header.fieldTree, raw)
+			if err != nil {
+				return nil, errorWrap(line.number, err)
 			}
 			rows = append(rows, row)
 			if ctx.strict && len(rows) > header.length {
@@ -506,6 +501,41 @@ func (p *parser) parseArray(header parsedHeader, depth int) (any, error) {
 		return nil, errorAtf(p.lines[p.pos-1].number, "list length mismatch; expected %d items", header.length)
 	}
 	return values, nil
+}
+
+func decodeTabularRow(fields []fieldNode, raw []string) (map[string]any, error) {
+	row := make(map[string]any)
+	index := 0
+	if err := decodeTabularFields(row, fields, raw, &index); err != nil {
+		return nil, err
+	}
+	return row, nil
+}
+
+func decodeTabularFields(row map[string]any, fields []fieldNode, raw []string, index *int) error {
+	for _, field := range fields {
+		if len(field.children) > 0 {
+			nested := make(map[string]any)
+			before := *index
+			if err := decodeTabularFields(nested, field.children, raw, index); err != nil {
+				return err
+			}
+			if *index > before {
+				row[field.name] = nested
+			}
+			continue
+		}
+		if *index >= len(raw) {
+			continue
+		}
+		value, err := decodePrimitiveToken(raw[*index])
+		if err != nil {
+			return err
+		}
+		row[field.name] = value
+		*index++
+	}
+	return nil
 }
 
 func (p *parser) current() parsedLine {
