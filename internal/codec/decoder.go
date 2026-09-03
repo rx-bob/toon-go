@@ -204,6 +204,13 @@ func (p *parser) parseDocument() (any, error) {
 
 	if ok && first.indent == 0 && !header.keyPresent {
 		p.pos++
+		if header.keyed {
+			value, err := p.parseKeyedObject(header, 0)
+			if err != nil {
+				return nil, err
+			}
+			return p.finishRoot(value)
+		}
 		value, err := p.parseArray(header, 0)
 		if err != nil {
 			return nil, err
@@ -259,7 +266,12 @@ func (p *parser) parseObject(depth int) (map[string]any, error) {
 				return nil, errorAt(line.number, "arrays within objects must have a key")
 			}
 			p.pos++
-			value, err := p.parseArray(header, depth)
+			var value any
+			if header.keyed {
+				value, err = p.parseKeyedObject(header, depth)
+			} else {
+				value, err = p.parseArray(header, depth)
+			}
 			if err != nil {
 				return nil, err
 			}
@@ -453,7 +465,12 @@ func (p *parser) parseArray(header parsedHeader, depth int) (any, error) {
 			if !header.keyPresent {
 				return nil, errorAt(line.number, "arrays within objects must have a key")
 			}
-			arrayValue, err := p.parseArray(header, depth+2)
+			var arrayValue any
+			if header.keyed {
+				arrayValue, err = p.parseKeyedObject(header, depth+2)
+			} else {
+				arrayValue, err = p.parseArray(header, depth+2)
+			}
 			if err != nil {
 				return nil, err
 			}
@@ -510,6 +527,82 @@ func decodeTabularRow(fields []fieldNode, raw []string) (map[string]any, error) 
 		return nil, err
 	}
 	return row, nil
+}
+
+func (p *parser) parseKeyedObject(header parsedHeader, depth int) (map[string]any, error) {
+	result := make(map[string]any)
+	seen := make(map[string]struct{})
+	for p.pos < len(p.lines) {
+		line := p.current()
+		if line.blank {
+			if p.cfg.strict {
+				if len(seen) == 0 {
+					p.pos++
+					continue
+				}
+				if nextIndent, ok := p.nextNonBlankIndent(p.pos); !ok || nextIndent <= depth {
+					break
+				}
+				return nil, errorAt(line.number, "blank line inside keyed array")
+			}
+			p.pos++
+			continue
+		}
+		if line.indent <= depth {
+			break
+		}
+		if line.indent != depth+1 {
+			if p.cfg.strict {
+				return nil, errorAt(line.number, "invalid indentation for keyed entry row")
+			}
+			p.pos++
+			continue
+		}
+		colon := indexOutsideQuotes(line.content, ':')
+		if colon < 0 {
+			if p.cfg.strict {
+				return nil, errorAt(line.number, "keyed entry row missing colon")
+			}
+			p.pos++
+			continue
+		}
+		key, err := decodeKeyToken(trimSpaces(line.content[:colon]))
+		if err != nil {
+			return nil, errorWrap(line.number, err)
+		}
+		rest := trimSpaces(line.content[colon+1:])
+		var raw []string
+		if rest != "" {
+			raw, err = parsepkg.SplitInlineValues(rest, header.delimiter.rune())
+			if err != nil {
+				return nil, errorWrap(line.number, err)
+			}
+		}
+		if p.cfg.strict && len(raw) != len(header.leafFields) {
+			return nil, errorAt(line.number, "keyed entry row width mismatch")
+		}
+		value, err := decodeTabularRow(header.fieldTree, raw)
+		if err != nil {
+			return nil, errorWrap(line.number, err)
+		}
+		p.pos++
+		if _, exists := seen[key]; exists && p.cfg.strict {
+			return nil, errorAtf(line.number, "duplicate object key %q", key)
+		}
+		seen[key] = struct{}{}
+		result[key] = value
+		if p.cfg.strict && len(seen) > header.length {
+			return nil, errorAtf(line.number, "too many keyed entries (expected %d)", header.length)
+		}
+	}
+	if p.cfg.strict && len(seen) != header.length {
+		line := header.sourceLine
+		if line == 0 && p.pos > 0 {
+			line = p.lines[p.pos-1].number
+		}
+		return nil, errorAtf(line, "keyed entry count mismatch; expected %d rows", header.length)
+	}
+	return result, nil
 }
 
 func decodeTabularFields(row map[string]any, fields []fieldNode, raw []string, index *int) error {
@@ -597,7 +690,12 @@ func (p *parser) collectObjectListSiblings(obj map[string]any, depth int) error 
 			return errorWrap(next.number, err)
 		} else if isHeader {
 			p.pos++
-			value, err := p.parseArray(header, depth+1)
+			var value any
+			if header.keyed {
+				value, err = p.parseKeyedObject(header, depth+2)
+			} else {
+				value, err = p.parseArray(header, depth+1)
+			}
 			if err != nil {
 				return err
 			}
