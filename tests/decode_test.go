@@ -24,6 +24,39 @@ func TestDecodeRootForms(t *testing.T) {
 	if len(slice) != 2 || slice[0].(float64) != 1 || slice[1].(float64) != 2 {
 		t.Fatalf("unexpected root array: %#v", slice)
 	}
+
+	empty, err := toon.DecodeString("[]")
+	if err != nil {
+		t.Fatalf("DecodeString empty root array: %v", err)
+	}
+	if got, ok := empty.([]any); !ok || len(got) != 0 {
+		t.Fatalf("unexpected empty root array: %#v", empty)
+	}
+}
+
+func TestDecodeRootArrayConsumesDocument(t *testing.T) {
+	for _, strict := range []bool{true, false} {
+		value, err := toon.DecodeString("[2]: 1,2\njunk: 3", toon.WithStrictMode(strict))
+		if strict {
+			if err == nil {
+				t.Fatalf("strict decode accepted trailing root content: %#v", value)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatalf("non-strict decode rejected permitted trailing content: %v", err)
+		}
+		got := value.([]any)
+		if len(got) != 2 || got[0].(float64) != 1 || got[1].(float64) != 2 {
+			t.Fatalf("unexpected non-strict root array: %#v", value)
+		}
+	}
+
+	for _, doc := range []string{"[2]: 1,2\nhello", "[]\n42"} {
+		if _, err := toon.DecodeString(doc, toon.WithStrictMode(false)); err == nil {
+			t.Fatalf("non-strict decode accepted trailing scalar %q", doc)
+		}
+	}
 }
 
 func TestDecodeStrictErrors(t *testing.T) {

@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	formatpkg "github.com/toon-format/toon-go/internal/format"
 	parsepkg "github.com/toon-format/toon-go/internal/parse"
@@ -29,6 +30,9 @@ func NewDecoder(opts ...DecoderOption) *Decoder {
 
 // Decode parses the provided TOON document.
 func (d *Decoder) Decode(data []byte) (any, error) {
+	if d.cfg.strict && !utf8.Valid(data) {
+		return nil, errors.New("toon: input is not valid UTF-8")
+	}
 	parser, err := newParser(string(data), d.cfg)
 	if err != nil {
 		return nil, err
@@ -42,7 +46,11 @@ func (d *Decoder) Decode(data []byte) (any, error) {
 
 // DecodeString is a convenience wrapper around Decode.
 func (d *Decoder) DecodeString(doc string) (any, error) {
-	return d.Decode([]byte(doc))
+	parser, err := newParser(doc, d.cfg)
+	if err != nil {
+		return nil, err
+	}
+	return parser.parseDocument()
 }
 
 // Decode uses a temporary decoder configured with opts.
@@ -70,29 +78,22 @@ type parsedLine struct {
 }
 
 func newParser(input string, cfg decoderOptions) (*parser, error) {
-	rawLines := splitLines(input)
+	rawLines := scanLines(input)
 	lines := make([]parsedLine, 0, len(rawLines))
-	for idx, raw := range rawLines {
-		if raw == "" {
-			lines = append(lines, parsedLine{
-				number:  idx + 1,
-				indent:  0,
-				content: "",
-				raw:     "",
-				blank:   true,
-			})
+	for _, scanned := range rawLines {
+		if scanned.comment {
 			continue
 		}
-		indent, content, err := computeIndent(raw, cfg)
+		indent, content, err := computeIndent(scanned.text, cfg)
 		if err != nil {
-			return nil, errorWrap(idx+1, err)
+			return nil, errorWrap(scanned.number, err)
 		}
 		lines = append(lines, parsedLine{
-			number:  idx + 1,
+			number:  scanned.number,
 			indent:  indent,
 			content: content,
-			raw:     raw,
-			blank:   strings.TrimSpace(content) == "",
+			raw:     scanned.text,
+			blank:   content == "",
 		})
 	}
 	return &parser{
@@ -101,14 +102,49 @@ func newParser(input string, cfg decoderOptions) (*parser, error) {
 	}, nil
 }
 
-func splitLines(input string) []string {
-	input = strings.ReplaceAll(input, "\r\n", "\n")
-	lines := strings.Split(input, "\n")
-	// Drop trailing empty line caused by final newline.
-	if len(lines) > 0 && lines[len(lines)-1] == "" {
-		lines = lines[:len(lines)-1]
+type scannedLine struct {
+	number  int
+	text    string
+	comment bool
+}
+
+// scanLines is the document pre-pass. It preserves original line numbers,
+// removes comments before indentation validation, and performs only the
+// whitespace normalization allowed by the TOON grammar.
+func scanLines(input string) []scannedLine {
+	if strings.HasPrefix(input, "\ufeff") {
+		input = input[len("\ufeff"):]
+	}
+	lines := make([]scannedLine, 0)
+	start, number := 0, 1
+	for i := 0; i < len(input); i++ {
+		if input[i] != '\n' && input[i] != '\r' {
+			continue
+		}
+		lines = append(lines, makeScannedLine(number, input[start:i]))
+		number++
+		if input[i] == '\r' && i+1 < len(input) && input[i+1] == '\n' {
+			i++
+		}
+		start = i + 1
+	}
+	if start < len(input) {
+		lines = append(lines, makeScannedLine(number, input[start:]))
 	}
 	return lines
+}
+
+func makeScannedLine(number int, line string) scannedLine {
+	line = strings.TrimRight(line, " ")
+	comment := false
+	for i := 0; i < len(line); i++ {
+		if line[i] == ' ' {
+			continue
+		}
+		comment = line[i] == '#'
+		break
+	}
+	return scannedLine{number: number, text: line, comment: comment}
 }
 
 func computeIndent(line string, cfg decoderOptions) (int, string, error) {
@@ -121,7 +157,10 @@ func computeIndent(line string, cfg decoderOptions) (int, string, error) {
 			if cfg.strict {
 				return 0, "", errors.New("tabs are not allowed in indentation (strict mode)")
 			}
-			indent++
+			// Non-strict mode treats a tab as one indentation level. This keeps
+			// tab-indented data usable without allowing it to collapse to depth 0
+			// when indentSize is greater than one.
+			indent += cfg.indentSize
 		default:
 			content := line[i:]
 			if cfg.strict && indent%cfg.indentSize != 0 {
@@ -148,8 +187,13 @@ func (p *parser) parseDocument() (any, error) {
 		return nil, errorWrap(first.number, err)
 	}
 
-	if nonBlank == 1 && !ok && !isKeyValue(first.content) {
-		token := strings.TrimSpace(first.content)
+	if first.indent == 0 && first.content == "[]" {
+		p.pos++
+		return p.finishRoot([]any{})
+	}
+
+	if nonBlank == 1 && first.indent == 0 && !ok && !isKeyValue(first.content) {
+		token := trimSpaces(first.content)
 		value, err := decodePrimitiveToken(token)
 		if err != nil {
 			return nil, errorWrap(first.number, err)
@@ -160,10 +204,35 @@ func (p *parser) parseDocument() (any, error) {
 
 	if ok && first.indent == 0 && header.key == "" {
 		p.pos++
-		return p.parseArray(header, 0)
+		value, err := p.parseArray(header, 0)
+		if err != nil {
+			return nil, err
+		}
+		return p.finishRoot(value)
 	}
 
 	return p.parseObject(0)
+}
+
+// finishRoot enforces the root-form boundary after a root array has been
+// parsed. Non-strict mode permits trailing content, but it is never consumed
+// as part of the completed root value.
+func (p *parser) finishRoot(value any) (any, error) {
+	p.skipBlankLinesOutsideArrays()
+	if p.pos >= len(p.lines) {
+		return value, nil
+	}
+	if p.cfg.strict {
+		return nil, errorAt(p.current().number, "trailing content after root value")
+	}
+	// Non-strict mode may ignore trailing structural content, but a scalar
+	// line is never valid outside root-primitive position.
+	for _, line := range p.lines[p.pos:] {
+		if !line.blank && !isKeyValue(line.content) {
+			return nil, errorAt(line.number, "scalar line outside root primitive position")
+		}
+	}
+	return value, nil
 }
 
 func (p *parser) parseObject(depth int) (map[string]any, error) {
@@ -263,7 +332,7 @@ func (p *parser) parseArray(header parsedHeader, depth int) (any, error) {
 			if line.indent != depth+1 {
 				return nil, errorAt(line.number, "invalid indentation for tabular row")
 			}
-			trimmed := strings.TrimSpace(line.content)
+			trimmed := trimSpaces(line.content)
 			if indexOutsideQuotes(trimmed, ':') != -1 {
 				break
 			}
@@ -319,7 +388,7 @@ func (p *parser) parseArray(header parsedHeader, depth int) (any, error) {
 		if !strings.HasPrefix(line.content, "-") {
 			break
 		}
-		itemContent := strings.TrimSpace(line.content[1:])
+		itemContent := trimSpaces(line.content[1:])
 		p.pos++
 		if itemContent == "" {
 			values = append(values, map[string]any{})
@@ -498,8 +567,8 @@ func tryParseHeader(content string) (parsedHeader, bool, error) {
 	if colon == -1 {
 		return parsedHeader{}, false, nil
 	}
-	left := strings.TrimSpace(content[:colon])
-	right := strings.TrimSpace(content[colon+1:])
+	left := trimSpaces(content[:colon])
+	right := trimSpaces(content[colon+1:])
 	if left == "" {
 		return parsedHeader{}, false, nil
 	}
@@ -512,9 +581,9 @@ func tryParseHeader(content string) (parsedHeader, bool, error) {
 	if bracketOffset == -1 {
 		return parsedHeader{}, false, errors.New("missing closing bracket in array header")
 	}
-	keyPart := strings.TrimSpace(left[:bracketStart])
+	keyPart := trimSpaces(left[:bracketStart])
 	bracketSegment := rest[:bracketOffset]
-	fieldSegment := strings.TrimSpace(rest[bracketOffset+1:])
+	fieldSegment := trimSpaces(rest[bracketOffset+1:])
 
 	header := parsedHeader{
 		key:       "",
@@ -604,13 +673,17 @@ func splitKeyValue(content string) (string, string, error) {
 	if colon == -1 {
 		return "", "", errors.New("missing colon after key")
 	}
-	keyToken := strings.TrimSpace(content[:colon])
-	valueToken := strings.TrimSpace(content[colon+1:])
+	keyToken := trimSpaces(content[:colon])
+	valueToken := trimSpaces(content[colon+1:])
 	key, err := decodeKeyToken(keyToken)
 	if err != nil {
 		return "", "", err
 	}
 	return key, valueToken, nil
+}
+
+func trimSpaces(s string) string {
+	return strings.Trim(s, " ")
 }
 
 func decodeKeyToken(token string) (string, error) {

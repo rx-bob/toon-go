@@ -103,6 +103,8 @@ func Decode(data []byte, opts ...DecoderOption) (any, error) {
 }
 
 // DecodeString parses a TOON document string using a temporary decoder.
+// Unlike Decode, it receives an already-decoded host string and does not
+// perform byte-level UTF-8 validation.
 func DecodeString(s string, opts ...DecoderOption) (any, error) {
 	return codec.DecodeString(s, opts...)
 }
@@ -112,7 +114,8 @@ func WithStrictMode(strict bool) DecoderOption {
 	return codec.WithStrictMode(strict)
 }
 
-// WithDecoderIndent configures the expected indentation step.
+// WithDecoderIndent configures the expected indentation step in spaces. In
+// non-strict mode, leading tabs are accepted using the configured step.
 func WithDecoderIndent(spaces int) DecoderOption {
 	return codec.WithDecoderIndent(spaces)
 }

@@ -11,12 +11,9 @@ import (
 // pointer. Struct fields use `toon` struct tags for naming and omitempty
 // semantics, mirroring Marshal behaviour.
 func Unmarshal(data []byte, v any, opts ...DecoderOption) error {
-	if v == nil {
-		return errors.New("toon: Unmarshal nil target")
-	}
-	rv := reflect.ValueOf(v)
-	if rv.Kind() != reflect.Pointer || rv.IsNil() {
-		return errors.New("toon: Unmarshal target must be a non-nil pointer")
+	rv, err := validateUnmarshalTarget(v)
+	if err != nil {
+		return err
 	}
 	decoded, err := Decode(data, opts...)
 	if err != nil {
@@ -27,7 +24,26 @@ func Unmarshal(data []byte, v any, opts ...DecoderOption) error {
 
 // UnmarshalString decodes the TOON document in s into v.
 func UnmarshalString(s string, v any, opts ...DecoderOption) error {
-	return Unmarshal([]byte(s), v, opts...)
+	rv, err := validateUnmarshalTarget(v)
+	if err != nil {
+		return err
+	}
+	decoded, err := DecodeString(s, opts...)
+	if err != nil {
+		return err
+	}
+	return assignValue(rv.Elem(), decoded)
+}
+
+func validateUnmarshalTarget(v any) (reflect.Value, error) {
+	if v == nil {
+		return reflect.Value{}, errors.New("toon: Unmarshal nil target")
+	}
+	rv := reflect.ValueOf(v)
+	if rv.Kind() != reflect.Pointer || rv.IsNil() {
+		return reflect.Value{}, errors.New("toon: Unmarshal target must be a non-nil pointer")
+	}
+	return rv, nil
 }
 
 func assignValue(dst reflect.Value, src any) error {

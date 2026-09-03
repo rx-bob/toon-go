@@ -134,7 +134,9 @@ func WithStrictMode(strict bool) DecoderOption {
 	}
 }
 
-// WithDecoderIndent configures the expected indentation step.
+// WithDecoderIndent configures the expected indentation step in spaces. In
+// non-strict mode, leading tabs are accepted and each tab contributes one
+// indentation level at the configured step.
 func WithDecoderIndent(spaces int) DecoderOption {
 	return func(o *decoderOptions) {
 		if spaces > 0 {
