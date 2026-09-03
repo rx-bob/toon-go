@@ -182,7 +182,7 @@ func (p *parser) parseDocument() (any, error) {
 	nonBlank := p.countRemainingNonBlank()
 	first := p.current()
 
-	header, ok, err := tryParseHeader(first.content)
+	header, ok, err := p.parseHeader(first)
 	if err != nil {
 		return nil, errorWrap(first.number, err)
 	}
@@ -202,7 +202,7 @@ func (p *parser) parseDocument() (any, error) {
 		return value, nil
 	}
 
-	if ok && first.indent == 0 && header.key == "" {
+	if ok && first.indent == 0 && !header.keyPresent {
 		p.pos++
 		value, err := p.parseArray(header, 0)
 		if err != nil {
@@ -249,12 +249,12 @@ func (p *parser) parseObject(depth int) (map[string]any, error) {
 		if line.indent > depth {
 			return nil, errorAt(line.number, "unexpected indentation")
 		}
-		header, isHeader, err := tryParseHeader(line.content)
+		header, isHeader, err := p.parseHeader(line)
 		if err != nil {
 			return nil, errorWrap(line.number, err)
 		}
 		if isHeader {
-			if header.key == "" {
+			if !header.keyPresent {
 				return nil, errorAt(line.number, "arrays within objects must have a key")
 			}
 			p.pos++
@@ -312,7 +312,7 @@ func (p *parser) parseArray(header parsedHeader, depth int) (any, error) {
 		return values, nil
 	}
 
-	if len(header.fields) > 0 {
+	if len(header.leafFields) > 0 {
 		rows := make([]any, 0, header.length)
 		for p.pos < len(p.lines) {
 			line := p.current()
@@ -341,11 +341,11 @@ func (p *parser) parseArray(header parsedHeader, depth int) (any, error) {
 			if err != nil {
 				return nil, errorWrap(line.number, err)
 			}
-			if ctx.strict && len(raw) != len(header.fields) {
+			if ctx.strict && len(raw) != len(header.leafFields) {
 				return nil, errorAt(line.number, "tabular row width mismatch")
 			}
-			row := make(map[string]any, len(header.fields))
-			for idx, field := range header.fields {
+			row := make(map[string]any, len(header.leafFields))
+			for idx, field := range header.leafFields {
 				if idx >= len(raw) {
 					break
 				}
@@ -397,6 +397,7 @@ func (p *parser) parseArray(header parsedHeader, depth int) (any, error) {
 
 		if strings.HasPrefix(itemContent, "[") {
 			itemHeader, ok, err := tryParseHeader(itemContent)
+			itemHeader.sourceLine = line.number
 			if err != nil {
 				return nil, errorWrap(line.number, err)
 			}
@@ -414,7 +415,7 @@ func (p *parser) parseArray(header parsedHeader, depth int) (any, error) {
 		if header, isHeader, err := tryParseHeader(itemContent); err != nil {
 			return nil, errorWrap(line.number, err)
 		} else if isHeader {
-			if header.key == "" {
+			if !header.keyPresent {
 				return nil, errorAt(line.number, "arrays within objects must have a key")
 			}
 			arrayValue, err := p.parseArray(header, depth+1)
@@ -518,7 +519,7 @@ func (p *parser) collectObjectListSiblings(obj map[string]any, depth int) error 
 		if next.indent != depth+2 {
 			return errorAt(next.number, "invalid indentation for object list sibling")
 		}
-		if header, isHeader, err := tryParseHeader(next.content); err != nil {
+		if header, isHeader, err := p.parseHeader(next); err != nil {
 			return errorWrap(next.number, err)
 		} else if isHeader {
 			p.pos++
@@ -526,7 +527,7 @@ func (p *parser) collectObjectListSiblings(obj map[string]any, depth int) error 
 			if err != nil {
 				return err
 			}
-			if header.key == "" {
+			if !header.keyPresent {
 				return errorAt(next.number, "arrays within objects must have a key")
 			}
 			obj[header.key] = value
@@ -554,40 +555,49 @@ func (p *parser) collectObjectListSiblings(obj map[string]any, depth int) error 
 	return nil
 }
 
+func (p *parser) parseHeader(line parsedLine) (parsedHeader, bool, error) {
+	header, ok, err := tryParseHeader(line.content)
+	if ok {
+		header.sourceLine = line.number
+	}
+	return header, ok, err
+}
+
 type parsedHeader struct {
 	key          string
+	keyPresent   bool
+	keyed        bool
 	length       int
 	delimiter    Delimiter
-	fields       []string
+	fieldTree    []fieldNode
+	leafFields   []string
 	inlineValues string
+	sourceLine   int
 }
 
 func tryParseHeader(content string) (parsedHeader, bool, error) {
-	colon := indexOutsideQuotes(content, ':')
+	bracketStart := indexOutsideQuotes(content, '[')
+	if bracketStart == -1 {
+		return parsedHeader{}, false, nil
+	}
+	bracketEnd := matchingBracket(content, bracketStart)
+	if bracketEnd == -1 {
+		return parsedHeader{}, false, errors.New("missing closing bracket in array header")
+	}
+	colon := indexOutsideQuotesFrom(content, ':', bracketEnd+1)
 	if colon == -1 {
 		return parsedHeader{}, false, nil
 	}
 	left := trimSpaces(content[:colon])
 	right := trimSpaces(content[colon+1:])
-	if left == "" {
-		return parsedHeader{}, false, nil
-	}
-	bracketStart := indexOutsideQuotes(left, '[')
-	if bracketStart == -1 {
-		return parsedHeader{}, false, nil
-	}
-	rest := left[bracketStart+1:]
-	bracketOffset := indexOutsideQuotes(rest, ']')
-	if bracketOffset == -1 {
-		return parsedHeader{}, false, errors.New("missing closing bracket in array header")
-	}
 	keyPart := trimSpaces(left[:bracketStart])
-	bracketSegment := rest[:bracketOffset]
-	fieldSegment := trimSpaces(rest[bracketOffset+1:])
+	bracketSegment := content[bracketStart+1 : bracketEnd]
+	fieldSegment := trimSpaces(content[bracketEnd+1 : colon])
 
 	header := parsedHeader{
-		key:       "",
-		delimiter: DelimiterComma,
+		key:        "",
+		delimiter:  DelimiterComma,
+		keyPresent: keyPart != "",
 	}
 
 	if keyPart != "" {
@@ -598,47 +608,196 @@ func tryParseHeader(content string) (parsedHeader, bool, error) {
 		header.key = key
 	}
 
-	length, delim, err := parseBracketSegment(bracketSegment)
+	length, delim, keyed, err := parseBracketSegment(bracketSegment)
 	if err != nil {
 		return parsedHeader{}, false, err
 	}
 	header.length = length
 	header.delimiter = delim
+	header.keyed = keyed
 
 	if fieldSegment != "" {
 		if !strings.HasPrefix(fieldSegment, "{") || !strings.HasSuffix(fieldSegment, "}") {
 			return parsedHeader{}, false, errors.New("invalid field segment in array header")
 		}
 		inner := fieldSegment[1 : len(fieldSegment)-1]
-		if inner != "" {
-			rawFields, err := parsepkg.SplitInlineValues(inner, delim.rune())
-			if err != nil {
-				return parsedHeader{}, false, err
-			}
-			fields := make([]string, 0, len(rawFields))
-			for _, token := range rawFields {
-				field, err := decodeKeyToken(token)
-				if err != nil {
-					return parsedHeader{}, false, err
-				}
-				fields = append(fields, field)
-			}
-			header.fields = fields
+		fields, err := parseFieldNodes(inner, delim.rune())
+		if err != nil {
+			return parsedHeader{}, false, err
 		}
+		header.fieldTree = fields
+		header.leafFields = flattenFields(fields)
 	}
 
 	header.inlineValues = right
 	return header, true, nil
 }
 
-func parseBracketSegment(segment string) (int, Delimiter, error) {
+func matchingBracket(s string, start int) int {
+	inQuotes, escaped := false, false
+	for i := start + 1; i < len(s); i++ {
+		c := s[i]
+		if escaped {
+			escaped = false
+			continue
+		}
+		if c == '\\' && inQuotes {
+			escaped = true
+			continue
+		}
+		if c == '"' {
+			inQuotes = !inQuotes
+			continue
+		}
+		if !inQuotes && c == ']' {
+			return i
+		}
+	}
+	return -1
+}
+
+func indexOutsideQuotesFrom(s string, target rune, start int) int {
+	if start < 0 {
+		start = 0
+	}
+	part := s[start:]
+	i := indexOutsideQuotes(part, target)
+	if i == -1 {
+		return -1
+	}
+	return start + i
+}
+
+func parseFieldNodes(segment string, delimiter rune) ([]fieldNode, error) {
+	parts, err := splitFieldEntries(segment, delimiter)
+	if err != nil {
+		return nil, err
+	}
+	fields := make([]fieldNode, 0, len(parts))
+	for _, part := range parts {
+		part = trimSpaces(part)
+		if part == "" {
+			return nil, errors.New("empty field name")
+		}
+		open := indexOutsideQuotes(part, '{')
+		if open == -1 {
+			name, err := decodeKeyToken(part)
+			if err != nil {
+				return nil, err
+			}
+			fields = append(fields, fieldNode{name: name})
+			continue
+		}
+		if !strings.HasSuffix(trimSpaces(part), "}") {
+			return nil, errors.New("invalid nested field group")
+		}
+		close := matchingBrace(part, open)
+		if close != len(strings.TrimSpace(part))-1 {
+			return nil, errors.New("invalid nested field group")
+		}
+		name, err := decodeKeyToken(trimSpaces(part[:open]))
+		if err != nil {
+			return nil, err
+		}
+		children, err := parseFieldNodes(part[open+1:close], delimiter)
+		if err != nil {
+			return nil, err
+		}
+		if len(children) == 0 {
+			return nil, errors.New("empty nested field group")
+		}
+		fields = append(fields, fieldNode{name: name, children: children})
+	}
+	return fields, nil
+}
+
+func splitFieldEntries(s string, delimiter rune) ([]string, error) {
+	var parts []string
+	start, depth := 0, 0
+	inQuotes, escaped := false, false
+	for i, r := range s {
+		if escaped {
+			escaped = false
+			continue
+		}
+		if r == '\\' && inQuotes {
+			escaped = true
+			continue
+		}
+		if r == '"' {
+			inQuotes = !inQuotes
+			continue
+		}
+		if inQuotes {
+			continue
+		}
+		switch r {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth < 0 {
+				return nil, errors.New("unbalanced field group")
+			}
+		default:
+			if r == delimiter && depth == 0 {
+				parts = append(parts, s[start:i])
+				start = i + 1
+			}
+		}
+	}
+	if inQuotes || depth != 0 {
+		return nil, errors.New("unbalanced field group")
+	}
+	return append(parts, s[start:]), nil
+}
+
+func matchingBrace(s string, start int) int {
+	depth := 0
+	inQuotes, escaped := false, false
+	for i := start; i < len(s); i++ {
+		c := s[i]
+		if escaped {
+			escaped = false
+			continue
+		}
+		if c == '\\' && inQuotes {
+			escaped = true
+			continue
+		}
+		if c == '"' {
+			inQuotes = !inQuotes
+			continue
+		}
+		if inQuotes {
+			continue
+		}
+		if c == '{' {
+			depth++
+		}
+		if c == '}' {
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+func parseBracketSegment(segment string) (int, Delimiter, bool, error) {
 	useMarker := false
+	keyed := false
+	if strings.HasSuffix(segment, ":") {
+		keyed = true
+		segment = strings.TrimSuffix(segment, ":")
+	}
 	if strings.HasPrefix(segment, "#") {
 		useMarker = true
 		segment = segment[1:]
 	}
 	if segment == "" {
-		return 0, DelimiterComma, errors.New("missing array length")
+		return 0, DelimiterComma, keyed, errors.New("missing array length")
 	}
 	var digits strings.Builder
 	var delim = DelimiterComma
@@ -653,19 +812,20 @@ func parseBracketSegment(segment string) (int, Delimiter, error) {
 		case '|':
 			delim = DelimiterPipe
 		default:
-			return 0, DelimiterComma, fmt.Errorf("invalid delimiter symbol %q", r)
+			return 0, DelimiterComma, keyed, fmt.Errorf("invalid delimiter symbol %q", r)
 		}
 	}
 	lengthStr := digits.String()
 	if lengthStr == "" {
-		return 0, DelimiterComma, errors.New("missing digits in array length")
+		return 0, DelimiterComma, keyed, errors.New("missing digits in array length")
 	}
 	length, err := strconv.Atoi(lengthStr)
 	if err != nil {
-		return 0, DelimiterComma, err
+		return 0, DelimiterComma, keyed, err
 	}
-	_ = useMarker // marker is ignored semantically.
-	return length, delim, nil
+	_ = useMarker // legacy marker remains rejected by later grammar work.
+	_ = keyed
+	return length, delim, keyed, nil
 }
 
 func splitKeyValue(content string) (string, string, error) {
