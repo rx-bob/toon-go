@@ -740,9 +740,17 @@ func splitFieldEntries(s string, delimiter rune) ([]string, error) {
 				return nil, errors.New("unbalanced field group")
 			}
 		default:
-			if r == delimiter && depth == 0 {
-				parts = append(parts, s[start:i])
-				start = i + 1
+			if depth >= 0 {
+				switch r {
+				case ',', '|', '\t':
+					if r != delimiter {
+						return nil, fmt.Errorf("field-list delimiter does not match header delimiter")
+					}
+					if depth == 0 {
+						parts = append(parts, s[start:i])
+						start = i + 1
+					}
+				}
 			}
 		}
 	}
@@ -786,46 +794,50 @@ func matchingBrace(s string, start int) int {
 }
 
 func parseBracketSegment(segment string) (int, Delimiter, bool, error) {
-	useMarker := false
 	keyed := false
-	if strings.HasSuffix(segment, ":") {
+	if colon := strings.IndexByte(segment, ':'); colon >= 0 {
 		keyed = true
-		segment = strings.TrimSuffix(segment, ":")
-	}
-	if strings.HasPrefix(segment, "#") {
-		useMarker = true
-		segment = segment[1:]
+		if strings.Contains(segment[colon+1:], ":") {
+			return 0, DelimiterComma, keyed, errors.New("multiple keyed markers")
+		}
+		tail := segment[colon+1:]
+		if strings.ContainsAny(tail, ",:") || len(tail) > 1 || (len(tail) == 1 && tail[0] != '|' && tail[0] != '\t') {
+			return 0, DelimiterComma, keyed, errors.New("invalid keyed marker")
+		}
+		if strings.ContainsAny(segment[:colon], ",|\t") {
+			return 0, DelimiterComma, keyed, errors.New("misplaced keyed marker")
+		}
+		segment = segment[:colon] + tail
 	}
 	if segment == "" {
 		return 0, DelimiterComma, keyed, errors.New("missing array length")
 	}
-	var digits strings.Builder
-	var delim = DelimiterComma
-	for _, r := range segment {
-		if unicode.IsDigit(r) {
-			digits.WriteRune(r)
-			continue
-		}
-		switch r {
-		case '\t':
+	lengthText := segment
+	delim := DelimiterComma
+	if last := segment[len(segment)-1]; last == '\t' || last == '|' {
+		lengthText = segment[:len(segment)-1]
+		if last == '\t' {
 			delim = DelimiterTab
-		case '|':
+		} else {
 			delim = DelimiterPipe
-		default:
-			return 0, DelimiterComma, keyed, fmt.Errorf("invalid delimiter symbol %q", r)
 		}
 	}
-	lengthStr := digits.String()
-	if lengthStr == "" {
+	if lengthText == "" {
 		return 0, DelimiterComma, keyed, errors.New("missing digits in array length")
 	}
-	length, err := strconv.Atoi(lengthStr)
+	if len(lengthText) > 1 && lengthText[0] == '0' {
+		return 0, DelimiterComma, keyed, errors.New("array length has leading zeros")
+	}
+	for i := 0; i < len(lengthText); i++ {
+		if lengthText[i] < '0' || lengthText[i] > '9' {
+			return 0, DelimiterComma, keyed, fmt.Errorf("invalid array length %q", lengthText)
+		}
+	}
+	parsed, err := strconv.ParseUint(lengthText, 10, strconv.IntSize)
 	if err != nil {
 		return 0, DelimiterComma, keyed, err
 	}
-	_ = useMarker // legacy marker remains rejected by later grammar work.
-	_ = keyed
-	return length, delim, keyed, nil
+	return int(parsed), delim, keyed, nil
 }
 
 func splitKeyValue(content string) (string, string, error) {
