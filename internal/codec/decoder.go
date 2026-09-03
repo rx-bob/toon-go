@@ -339,6 +339,10 @@ func (p *parser) parseArray(header parsedHeader, depth int) (any, error) {
 			line := p.current()
 			if line.blank {
 				if ctx.strict {
+					if len(rows) == 0 {
+						p.pos++
+						continue
+					}
 					if nextIndent, ok := p.nextNonBlankIndent(p.pos); !ok || nextIndent <= depth {
 						break
 					}
@@ -392,6 +396,10 @@ func (p *parser) parseArray(header parsedHeader, depth int) (any, error) {
 		line := p.current()
 		if line.blank {
 			if ctx.strict {
+				if len(values) == 0 {
+					p.pos++
+					continue
+				}
 				if nextIndent, ok := p.nextNonBlankIndent(p.pos); !ok || nextIndent <= depth {
 					break
 				}
@@ -417,6 +425,10 @@ func (p *parser) parseArray(header parsedHeader, depth int) (any, error) {
 		}
 
 		if strings.HasPrefix(itemContent, "[") {
+			if itemContent == "[]" {
+				values = append(values, []any{})
+				continue
+			}
 			itemHeader, ok, err := tryParseHeader(itemContent)
 			itemHeader.sourceLine = line.number
 			if err != nil {
@@ -428,7 +440,11 @@ func (p *parser) parseArray(header parsedHeader, depth int) (any, error) {
 			if len(itemHeader.fieldTree) > 0 && !itemHeader.keyPresent {
 				return nil, errorAt(line.number, "keyless fields-bearing header is not valid in a list item")
 			}
-			itemValue, err := p.parseArray(itemHeader, depth+1)
+			itemDepth := depth + 1
+			if itemHeader.keyPresent {
+				itemDepth = depth + 2
+			}
+			itemValue, err := p.parseArray(itemHeader, itemDepth)
 			if err != nil {
 				return nil, err
 			}
@@ -442,7 +458,7 @@ func (p *parser) parseArray(header parsedHeader, depth int) (any, error) {
 			if !header.keyPresent {
 				return nil, errorAt(line.number, "arrays within objects must have a key")
 			}
-			arrayValue, err := p.parseArray(header, depth+1)
+			arrayValue, err := p.parseArray(header, depth+2)
 			if err != nil {
 				return nil, err
 			}
