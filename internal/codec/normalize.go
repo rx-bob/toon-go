@@ -126,6 +126,9 @@ func normalize(v any, cfg encoderOptions) (normalizedValue, error) {
 
 func normalizeStructValue(val reflect.Value, cfg encoderOptions) (Object, error) {
 	meta := cachedStructMeta(val.Type())
+	if meta.err != nil {
+		return Object{}, meta.err
+	}
 	fields := make([]Field, 0, len(meta.fields))
 	for _, field := range meta.fields {
 		childValue := fieldValueByIndex(val, field.index)
@@ -146,7 +149,12 @@ func normalizeStructValue(val reflect.Value, cfg encoderOptions) (Object, error)
 
 func normalizeObjectFields(fields []Field, cfg encoderOptions) (Object, error) {
 	normalized := make([]Field, 0, len(fields))
+	seen := make(map[string]struct{}, len(fields))
 	for _, field := range fields {
+		if _, exists := seen[field.Key]; exists {
+			return Object{}, fmt.Errorf("duplicate object key %q", field.Key)
+		}
+		seen[field.Key] = struct{}{}
 		child, err := normalize(field.Value, cfg)
 		if err != nil {
 			return Object{}, fmt.Errorf("toon: %s: %w", field.Key, err)

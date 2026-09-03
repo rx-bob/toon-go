@@ -1,6 +1,7 @@
 package codec
 
 import (
+	"fmt"
 	"reflect"
 	"strings"
 	"sync"
@@ -15,6 +16,7 @@ type structFieldMeta struct {
 type structMeta struct {
 	fields []structFieldMeta
 	lookup map[string]structFieldMeta
+	err    error
 }
 
 var structCache sync.Map // map[reflect.Type]structMeta
@@ -48,6 +50,13 @@ func buildStructMeta(t reflect.Type) structMeta {
 			name:      name,
 			omitEmpty: opts["omitempty"],
 			index:     sf.Index,
+		}
+		if _, exists := lookup[name]; exists {
+			return structMeta{
+				fields: fields,
+				lookup: lookup,
+				err:    fmt.Errorf("duplicate struct field name %q", name),
+			}
 		}
 		fields = append(fields, meta)
 		lookup[name] = meta
