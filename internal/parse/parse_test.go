@@ -3,7 +3,34 @@ package parse
 import (
 	"reflect"
 	"testing"
+	"unsafe"
 )
+
+func TestUnquoteString(t *testing.T) {
+	t.Run("clean body is zero-copy", func(t *testing.T) {
+		token := `"hello, 世界"`
+		got, err := UnquoteString(token)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "hello, 世界" {
+			t.Fatalf("UnquoteString() = %q", got)
+		}
+		if unsafe.StringData(got) != unsafe.StringData(token[1:]) {
+			t.Fatal("clean unquoted body was copied")
+		}
+	})
+
+	t.Run("escapes decode", func(t *testing.T) {
+		got, err := UnquoteString(`"line\n\"quote\""`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "line\n\"quote\"" {
+			t.Fatalf("UnquoteString() = %q", got)
+		}
+	})
+}
 
 func TestSplitInlineValues_Delimiters(t *testing.T) {
 	tests := []struct {

@@ -17,7 +17,7 @@ func UnquoteString(token string) (string, error) {
 		return "", errors.New("invalid quoted string")
 	}
 	body := token[1 : len(token)-1]
-	if strings.IndexByte(body, '\\') == -1 {
+	if !simd.HasEscape(unsafe.Slice(unsafe.StringData(body), len(body))) {
 		if !utf8.ValidString(body) {
 			return "", errors.New("invalid UTF-8 in quoted string")
 		}

@@ -7,6 +7,9 @@ import (
 	"strconv"
 	"strings"
 	"unicode/utf8"
+	"unsafe"
+
+	"github.com/toon-format/toon-go/internal/simd"
 )
 
 // Context captures delimiter information for quoting decisions.
@@ -45,24 +48,18 @@ func NeedsQuoting(s string, ctx Context) bool {
 	if HasLeadingZeroDecimal(s) {
 		return true
 	}
-	if strings.ContainsAny(s, ":\\\"[]{}") {
-		return true
-	}
-	if strings.ContainsRune(s, '\n') || strings.ContainsRune(s, '\r') || strings.ContainsRune(s, '\t') {
-		return true
-	}
-	for _, r := range s {
-		if r < 0x20 {
-			return true
-		}
-	}
 	if strings.HasPrefix(s, "-") || strings.HasPrefix(s, "#") {
 		return true
 	}
-	if ctx.InArray && ctx.Active != 0 && strings.ContainsRune(s, ctx.Active) {
+
+	delim := ctx.Document
+	if ctx.InArray {
+		delim = ctx.Active
+	}
+	if delim < utf8.RuneSelf && simd.NeedsQuotingAuto(stringBytes(s), byte(delim)) {
 		return true
 	}
-	if !ctx.InArray && ctx.Document != 0 && strings.ContainsRune(s, ctx.Document) {
+	if delim >= utf8.RuneSelf && strings.ContainsRune(s, delim) {
 		return true
 	}
 	return false
@@ -70,6 +67,51 @@ func NeedsQuoting(s string, ctx Context) bool {
 
 // QuoteString escapes and wraps the string in double quotes.
 func QuoteString(s string) (string, error) {
+	if !utf8.ValidString(s) {
+		return quoteStringScalar(s), nil
+	}
+
+	var b strings.Builder
+	b.Grow(len(s) + 2)
+	b.WriteByte('"')
+
+	data := stringBytes(s)
+	start := 0
+	for start < len(s) {
+		idx := simd.IndexSpecialOrControlAuto(data[start:], 0)
+		if idx < 0 {
+			b.WriteString(s[start:])
+			break
+		}
+		idx += start
+		b.WriteString(s[start:idx])
+		switch s[idx] {
+		case '\\':
+			b.WriteString("\\\\")
+		case '"':
+			b.WriteString("\\\"")
+		case '\n':
+			b.WriteString("\\n")
+		case '\r':
+			b.WriteString("\\r")
+		case '\t':
+			b.WriteString("\\t")
+		default:
+			if s[idx] < 0x20 {
+				fmt.Fprintf(&b, `\u%04x`, s[idx])
+			} else {
+				b.WriteByte(s[idx])
+			}
+		}
+		start = idx + 1
+	}
+	b.WriteByte('"')
+	return b.String(), nil
+}
+
+// quoteStringScalar preserves QuoteString's historical range-based behavior
+// for invalid UTF-8 input, where invalid byte sequences become RuneError.
+func quoteStringScalar(s string) string {
 	var b strings.Builder
 	b.Grow(len(s) + 2)
 	b.WriteByte('"')
@@ -94,7 +136,11 @@ func QuoteString(s string) (string, error) {
 		}
 	}
 	b.WriteByte('"')
-	return b.String(), nil
+	return b.String()
+}
+
+func stringBytes(s string) []byte {
+	return unsafe.Slice(unsafe.StringData(s), len(s))
 }
 
 // ValidateCharacters ensures the string does not contain unsupported control characters.

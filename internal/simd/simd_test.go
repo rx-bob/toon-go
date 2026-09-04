@@ -6,8 +6,6 @@ import (
 	"math/rand"
 	"strings"
 	"testing"
-
-	"github.com/toon-format/toon-go/internal/format"
 )
 
 func TestCPUFeatures_Queries(t *testing.T) {
@@ -154,12 +152,12 @@ func TestAlgorithm_String(t *testing.T) {
 
 func TestSWAR_QuoteBoundaryAlignments(t *testing.T) {
 	cases := []struct {
-		name          string
-		input         string
-		delim         byte
-		wantIndices   []int
-		wantFirstIdx  int
-		wantInQuotes  bool
+		name         string
+		input        string
+		delim        byte
+		wantIndices  []int
+		wantFirstIdx int
+		wantInQuotes bool
 	}{
 		{
 			name:         "QuoteAtByte0_SinglePair",
@@ -178,7 +176,7 @@ func TestSWAR_QuoteBoundaryAlignments(t *testing.T) {
 			wantInQuotes: false,
 		},
 		{
-			name:         "QuoteAtByte7",
+			name: "QuoteAtByte7",
 			// bytes 0..6 are '0'..'6', byte 7 is '"', byte 11 is '"', byte 12 is ','
 			input:        `0123456"abc",def`,
 			delim:        ',',
@@ -187,7 +185,7 @@ func TestSWAR_QuoteBoundaryAlignments(t *testing.T) {
 			wantInQuotes: false,
 		},
 		{
-			name:         "QuoteClosingAtByte7",
+			name: "QuoteClosingAtByte7",
 			// byte 0 is '"', byte 7 is '"', byte 8 is ','
 			input:        `"123456",foo`,
 			delim:        ',',
@@ -196,7 +194,7 @@ func TestSWAR_QuoteBoundaryAlignments(t *testing.T) {
 			wantInQuotes: false,
 		},
 		{
-			name:         "QuoteAtByte8_NewWordBoundary",
+			name: "QuoteAtByte8_NewWordBoundary",
 			// bytes 0..7 are '0'..'7', byte 8 is '"', byte 12 is '"', byte 13 is ','
 			input:        `01234567"abc",def`,
 			delim:        ',',
@@ -205,7 +203,7 @@ func TestSWAR_QuoteBoundaryAlignments(t *testing.T) {
 			wantInQuotes: false,
 		},
 		{
-			name:         "QuoteSpanningByte7And8",
+			name: "QuoteSpanningByte7And8",
 			// byte 7 is '"', byte 8 is 'x', byte 9 is '"', byte 10 is ','
 			input:        `0123456"x",next`,
 			delim:        ',',
@@ -214,7 +212,7 @@ func TestSWAR_QuoteBoundaryAlignments(t *testing.T) {
 			wantInQuotes: false,
 		},
 		{
-			name:         "QuoteAtByte15_SecondWordBoundary",
+			name: "QuoteAtByte15_SecondWordBoundary",
 			// bytes 0..14 are 15 chars, byte 15 is '"', byte 19 is '"', byte 20 is ','
 			input:        `012345678901234"abc",def`,
 			delim:        ',',
@@ -223,7 +221,7 @@ func TestSWAR_QuoteBoundaryAlignments(t *testing.T) {
 			wantInQuotes: false,
 		},
 		{
-			name:         "MultipleQuotePairsInSingleWord",
+			name: "MultipleQuotePairsInSingleWord",
 			// 8-byte block contains: "a","b",
 			input:        `"a","b",c`,
 			delim:        ',',
@@ -284,15 +282,15 @@ func TestSWAR_QuoteBoundaryAlignments(t *testing.T) {
 
 func TestSWAR_EscapedQuotesAcrossWordBoundaries(t *testing.T) {
 	cases := []struct {
-		name          string
-		input         string
-		delim         byte
-		wantIndices   []int
-		wantFirstIdx  int
-		wantInQuotes  bool
+		name         string
+		input        string
+		delim        byte
+		wantIndices  []int
+		wantFirstIdx int
+		wantInQuotes bool
 	}{
 		{
-			name:         "BackslashAtByte7_QuoteAtByte8_InsideQuotes",
+			name: "BackslashAtByte7_QuoteAtByte8_InsideQuotes",
 			// byte 0: ", bytes 1..6: 'a', byte 7: \, byte 8: ", bytes 9..10: 'b', byte 11: ", byte 12: ,
 			input:        "\"aaaaaa\\\"bb\",end",
 			delim:        ',',
@@ -301,7 +299,7 @@ func TestSWAR_EscapedQuotesAcrossWordBoundaries(t *testing.T) {
 			wantInQuotes: false,
 		},
 		{
-			name:         "DoubleBackslashAtBytes6And7_QuoteAtByte8_InsideQuotes",
+			name: "DoubleBackslashAtBytes6And7_QuoteAtByte8_InsideQuotes",
 			// \\ inside quotes escapes the slash, so " at byte 8 CLOSES the quote!
 			// byte 0: ", bytes 1..5: 'a', byte 6: \, byte 7: \, byte 8: ", byte 9: ,
 			input:        "\"aaaaa\\\\\",next",
@@ -311,7 +309,7 @@ func TestSWAR_EscapedQuotesAcrossWordBoundaries(t *testing.T) {
 			wantInQuotes: false,
 		},
 		{
-			name:         "BackslashOutsideQuotesAtByte7",
+			name: "BackslashOutsideQuotesAtByte7",
 			// outside quotes, \ is a literal, doesn't escape " at byte 8
 			// bytes 0..6: 'a', byte 7: \, byte 8: ", byte 9: 'b', byte 10: ", byte 11: ,
 			input:        "aaaaaaa\\\"b\",next",
@@ -1032,57 +1030,6 @@ func TestAVX2_Classifier_WideCharacterCorpora(t *testing.T) {
 	}
 }
 
-func TestAVX2_Classifier_DifferentialAgainstFormatNeedsQuoting(t *testing.T) {
-	// Tests that whenever NeedsQuotingAVX2 flags special/control/delim characters,
-	// format.NeedsQuoting agrees that quoting is needed.
-	testCases := []struct {
-		input string
-		delim byte
-	}{
-		{"normal", ','},
-		{"normal_value", ','},
-		{"with,comma", ','},
-		{"with:colon", ','},
-		{"with\\slash", ','},
-		{"with\"quote", ','},
-		{"with[bracket", ','},
-		{"with]bracket", ','},
-		{"with{brace", ','},
-		{"with}brace", ','},
-		{"with\nnewline", ','},
-		{"with\rcarriage", ','},
-		{"with\ttab", ','},
-		{"with\x01control", ','},
-		{"with|pipe", '|'},
-		{"with;semi", ';'},
-		{"long_clean_string_more_than_thirty_two_bytes_length", ','},
-		{"long_string_with_a_colon:inside_it_beyond_32_bytes", ','},
-		{"multibyte_chinese_世界_clean", ','},
-		{"multibyte_chinese_世界:has_colon", ','},
-		{"emoji_clean_🚀🌟", ','},
-		{"emoji_has_quote_🚀\"🌟", ','},
-	}
-
-	for _, tc := range testCases {
-		data := []byte(tc.input)
-		ctx := format.Context{InArray: true, Active: rune(tc.delim)}
-
-		gotAVX2 := NeedsQuotingAVX2(data, tc.delim)
-		gotSWAR := NeedsQuotingSWAR(data, tc.delim)
-		gotScalar := NeedsQuotingScalar(data, tc.delim)
-		wantQuoting := format.NeedsQuoting(tc.input, ctx)
-
-		if gotAVX2 != gotSWAR || gotAVX2 != gotScalar {
-			t.Fatalf("input %q (delim %q): AVX2=%v, SWAR=%v, Scalar=%v", tc.input, tc.delim, gotAVX2, gotSWAR, gotScalar)
-		}
-
-		// When AVX2 detects special/control/delim bytes, format.NeedsQuoting MUST be true
-		if gotAVX2 && !wantQuoting {
-			t.Fatalf("input %q (delim %q): NeedsQuotingAVX2 is true but format.NeedsQuoting is false", tc.input, tc.delim)
-		}
-	}
-}
-
 func TestNEON_Classifier_FallbackOnSimulatedDisabled(t *testing.T) {
 	restore := SetCPUFeaturesForTest(CPUFeatures{HasAVX2: false, HasBMI2: false, HasNEON: false})
 	defer restore()
@@ -1184,54 +1131,6 @@ func TestNEON_Classifier_WideCharacterCorpora(t *testing.T) {
 					}
 				}
 			}
-		}
-	}
-}
-
-func TestNEON_Classifier_DifferentialAgainstFormatNeedsQuoting(t *testing.T) {
-	testCases := []struct {
-		input string
-		delim byte
-	}{
-		{"normal", ','},
-		{"normal_value", ','},
-		{"with,comma", ','},
-		{"with:colon", ','},
-		{"with\\slash", ','},
-		{"with\"quote", ','},
-		{"with[bracket", ','},
-		{"with]bracket", ','},
-		{"with{brace", ','},
-		{"with}brace", ','},
-		{"with\nnewline", ','},
-		{"with\rcarriage", ','},
-		{"with\ttab", ','},
-		{"with\x01control", ','},
-		{"with|pipe", '|'},
-		{"with;semi", ';'},
-		{"long_clean_string_more_than_thirty_two_bytes_length", ','},
-		{"long_string_with_a_colon:inside_it_beyond_32_bytes", ','},
-		{"multibyte_chinese_世界_clean", ','},
-		{"multibyte_chinese_世界:has_colon", ','},
-		{"emoji_clean_🚀🌟", ','},
-		{"emoji_has_quote_🚀\"🌟", ','},
-	}
-
-	for _, tc := range testCases {
-		data := []byte(tc.input)
-		ctx := format.Context{InArray: true, Active: rune(tc.delim)}
-
-		gotNEON := NeedsQuotingNEON(data, tc.delim)
-		gotSWAR := NeedsQuotingSWAR(data, tc.delim)
-		gotScalar := NeedsQuotingScalar(data, tc.delim)
-		wantQuoting := format.NeedsQuoting(tc.input, ctx)
-
-		if gotNEON != gotSWAR || gotNEON != gotScalar {
-			t.Fatalf("input %q (delim %q): NEON=%v, SWAR=%v, Scalar=%v", tc.input, tc.delim, gotNEON, gotSWAR, gotScalar)
-		}
-
-		if gotNEON && !wantQuoting {
-			t.Fatalf("input %q (delim %q): NeedsQuotingNEON is true but format.NeedsQuoting is false", tc.input, tc.delim)
 		}
 	}
 }

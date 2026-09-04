@@ -149,3 +149,24 @@ func TestNeedsQuotingBenchmarks(t *testing.T) {
 		t.Error("colon and padding should need quoting")
 	}
 }
+
+func TestQuoteString(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"plain text", `"plain text"`},
+		{"quote: \" and slash: \\ ", `"quote: \" and slash: \\ "`},
+		{"line\ncarriage\r tab\t control\x01", `"line\ncarriage\r tab\t control\u0001"`},
+		{"東京", `"東京"`},
+	}
+	for _, tt := range tests {
+		got, err := QuoteString(tt.input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != tt.want {
+			t.Errorf("QuoteString(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}

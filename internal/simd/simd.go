@@ -124,6 +124,24 @@ func HasEscapeOrControlAuto(data []byte) bool {
 	return HasEscapeOrControlSWAR(data)
 }
 
+// HasEscape reports whether data contains an escape character ('\\'). It uses
+// the host's vectorized escape/control scanner to skip clean spans, while
+// preserving exact escape-only semantics when a control byte is encountered.
+func HasEscape(data []byte) bool {
+	for offset := 0; offset < len(data); {
+		idx := IndexEscapeOrControlAuto(data[offset:])
+		if idx < 0 {
+			return false
+		}
+		idx += offset
+		if data[idx] == '\\' {
+			return true
+		}
+		offset = idx + 1
+	}
+	return false
+}
+
 // IndexEscapeOrControlAuto returns the byte index of the first '\\' or < 0x20 character
 // using the optimal implementation for the host CPU.
 func IndexEscapeOrControlAuto(data []byte) int {
