@@ -128,19 +128,25 @@ func normalize(v any, cfg encoderOptions) (normalizedValue, error) {
 	return nil, fmt.Errorf("toon: unsupported value of type %T", v)
 }
 
-func isEligibleTabularSlice(v reflect.Value, delim Delimiter) bool {
+func candidateTabularSlicePlan(v reflect.Value, delim Delimiter) *tabularRowPlan {
+	if !v.IsValid() {
+		return nil
+	}
 	if v.Kind() != reflect.Slice && v.Kind() != reflect.Array {
-		return false
+		return nil
 	}
 	if v.Len() == 0 {
-		return false
+		return nil
 	}
 	elemType := v.Type().Elem()
 	if elemType.Kind() != reflect.Struct {
-		return false
+		return nil
 	}
 	plan := cachedTabularRowPlan(elemType, delim)
-	return plan.IsEligible()
+	if !plan.IsEligible() {
+		return nil
+	}
+	return plan
 }
 
 func normalizeStructValue(val reflect.Value, cfg encoderOptions) (Object, error) {
@@ -156,10 +162,22 @@ func normalizeStructValue(val reflect.Value, cfg encoderOptions) (Object, error)
 		}
 		var child normalizedValue
 		var err error
-		if isEligibleTabularSlice(childValue, cfg.delimiter) {
-			child = rawTabularSlice{
-				val:  childValue,
-				plan: cachedTabularRowPlan(childValue.Type().Elem(), cfg.delimiter),
+		if plan := candidateTabularSlicePlan(childValue, cfg.delimiter); plan != nil {
+			ok, estBytes, preflightErr := preflightTabularSlice(childValue, plan)
+			if preflightErr != nil {
+				return Object{}, preflightErr
+			}
+			if ok {
+				child = rawTabularSlice{
+					val:            childValue,
+					plan:           plan,
+					estimatedBytes: estBytes,
+				}
+			} else {
+				child, err = normalize(childValue.Interface(), cfg)
+				if err != nil {
+					return Object{}, fmt.Errorf("toon: %s: %w", field.name, err)
+				}
 			}
 		} else {
 			child, err = normalize(childValue.Interface(), cfg)

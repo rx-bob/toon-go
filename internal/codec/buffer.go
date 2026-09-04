@@ -4,7 +4,8 @@ import "unicode/utf8"
 
 // encBuffer is an append-only contiguous byte buffer designed for low-allocation encoding.
 type encBuffer struct {
-	buf []byte
+	buf   []byte
+	grows int
 }
 
 func newEncBuffer(hint int) encBuffer {
@@ -24,6 +25,10 @@ func (b *encBuffer) Cap() int {
 	return cap(b.buf)
 }
 
+func (b *encBuffer) Grows() int {
+	return b.grows
+}
+
 func (b *encBuffer) Reset() {
 	b.buf = b.buf[:0]
 }
@@ -38,6 +43,7 @@ func (b *encBuffer) String() string {
 
 func (b *encBuffer) Grow(n int) {
 	if cap(b.buf)-len(b.buf) < n {
+		b.grows++
 		newCap := 2*cap(b.buf) + n
 		if newCap < 64 {
 			newCap = 64
@@ -118,6 +124,9 @@ func estimateBufferSize(v normalizedValue) int {
 		sample := estimateBufferSize(val[0])
 		return n * (sample + 8)
 	case rawTabularSlice:
+		if val.estimatedBytes > 0 {
+			return val.estimatedBytes
+		}
 		n := val.val.Len()
 		if n == 0 {
 			return 16

@@ -58,15 +58,16 @@ type tabularFieldPlan struct {
 }
 
 type tabularRowPlan struct {
-	rowType       reflect.Type
-	delimiter     Delimiter
-	fields        []tabularFieldPlan
-	fieldNodes    []fieldNode
-	headerLiteral string
-	eligible      bool
-	reason        string
-	fctx          formatpkg.Context
-	stringFields  []int
+	rowType        reflect.Type
+	delimiter      Delimiter
+	fields         []tabularFieldPlan
+	fieldNodes     []fieldNode
+	headerLiteral  string
+	eligible       bool
+	reason         string
+	fctx           formatpkg.Context
+	stringFields   []int
+	rowStaticWidth int
 }
 
 func (p *tabularRowPlan) IsEligible() bool {
@@ -295,43 +296,90 @@ func compileTabularRowPlan(t reflect.Type, meta structMeta, delim Delimiter) *ta
 		InArray:  true,
 	}
 
+	var staticWidth int
+	for _, fp := range fieldPlans {
+		switch fp.op {
+		case opBool:
+			staticWidth += 5
+		case opInt, opUint:
+			staticWidth += 12
+		case opFloat32, opFloat64:
+			staticWidth += 12
+		}
+	}
+	if len(fieldPlans) > 1 {
+		delimLen := len(string(delim.rune()))
+		staticWidth += (len(fieldPlans) - 1) * delimLen
+	}
+	staticWidth += 1 + 2 // newline + indent
+
 	return &tabularRowPlan{
-		rowType:       t,
-		delimiter:     delim,
-		fields:        fieldPlans,
-		fieldNodes:    fieldNodes,
-		headerLiteral: hb.String(),
-		eligible:      true,
-		fctx:          fctx,
-		stringFields:  stringFields,
+		rowType:        t,
+		delimiter:      delim,
+		fields:         fieldPlans,
+		fieldNodes:     fieldNodes,
+		headerLiteral:  hb.String(),
+		eligible:       true,
+		fctx:           fctx,
+		stringFields:   stringFields,
+		rowStaticWidth: staticWidth,
 	}
 }
 
-func (p *tabularRowPlan) validateSlice(sliceVal reflect.Value) error {
-	if !p.eligible {
-		return errPlanIneligible
+// preflightTabularSlice performs a read-only validation and sizing pass over candidate
+// tabular rows before any destination mutation occurs.
+// Returns:
+//   - ok: true if eligible for fast-path encoding, false if ineligible (signals fallback to generic normalization).
+//   - estBytes: conservative buffer capacity hint.
+//   - err: non-nil if a real validation error is encountered (e.g. invalid UTF-8).
+func preflightTabularSlice(val reflect.Value, plan *tabularRowPlan) (bool, int, error) {
+	if plan == nil || !plan.eligible {
+		return false, 0, nil
 	}
-	if sliceVal.Kind() != reflect.Slice && sliceVal.Kind() != reflect.Array {
-		return errPlanIneligible
+	if !val.IsValid() {
+		return false, 0, nil
 	}
-	if sliceVal.Type().Elem() != p.rowType {
-		return errPlanIneligible
+	if val.Kind() != reflect.Slice && val.Kind() != reflect.Array {
+		return false, 0, nil
 	}
-	n := sliceVal.Len()
+	n := val.Len()
 	if n == 0 {
-		return errPlanIneligible
+		return false, 0, nil
+	}
+	if val.Type().Elem() != plan.rowType {
+		return false, 0, nil
 	}
 
-	if len(p.stringFields) > 0 {
+	var totalStringBytes int
+	if len(plan.stringFields) > 0 {
 		for r := 0; r < n; r++ {
-			rowVal := sliceVal.Index(r)
-			for _, flatIdx := range p.stringFields {
+			rowVal := val.Index(r)
+			for _, flatIdx := range plan.stringFields {
 				s := rowVal.Field(flatIdx).String()
 				if !utf8.ValidString(s) {
-					return fmt.Errorf("toon: string is not valid UTF-8")
+					return false, 0, fmt.Errorf("toon: string is not valid UTF-8")
+				}
+				totalStringBytes += len(s)
+				if len(s) == 0 || s[0] == ' ' || s[len(s)-1] == ' ' {
+					totalStringBytes += 2
 				}
 			}
 		}
+	}
+
+	headerEst := len(plan.headerLiteral) + 128
+	estBytes := headerEst + n*plan.rowStaticWidth + totalStringBytes
+	estBytes += (estBytes / 20) + 64 // 5% conservative headroom
+	return true, estBytes, nil
+}
+
+func (p *tabularRowPlan) validateSlice(sliceVal reflect.Value) error {
+	ok, _, err := preflightTabularSlice(sliceVal, p)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return errPlanIneligible
 	}
 	return nil
 }
@@ -376,23 +424,22 @@ func (p *tabularRowPlan) appendRow(b *encBuffer, rowVal reflect.Value) error {
 			} else {
 				b.buf = strconv.AppendUint(b.buf, val, 10)
 			}
-		case opFloat32, opFloat64:
+		case opFloat32:
+			f := float64(float32(fieldVal.Float()))
+			b.buf = p.appendFloat(b.buf, f)
+		case opFloat64:
 			f := fieldVal.Float()
-			if math.IsNaN(f) || math.IsInf(f, 0) {
-				b.WriteString("null")
-			} else {
-				if f == math.Copysign(0, -1) {
-					f = 0
-				}
-				b.buf = appendFormatNumber(b.buf, f)
-			}
+			b.buf = p.appendFloat(b.buf, f)
 		}
 	}
 	return nil
 }
 
-func appendFormatNumber(dst []byte, f float64) []byte {
-	if f == 0 {
+func (p *tabularRowPlan) appendFloat(dst []byte, f float64) []byte {
+	if math.IsNaN(f) || math.IsInf(f, 0) {
+		return append(dst, "null"...)
+	}
+	if f == math.Copysign(0, -1) {
 		return append(dst, '0')
 	}
 	abs := math.Abs(f)
@@ -410,11 +457,8 @@ func (p *tabularRowPlan) appendRows(
 	indentSize int,
 	listItem bool,
 ) (bool, error) {
-	if err := p.validateSlice(sliceVal); err != nil {
-		if errors.Is(err, errPlanIneligible) {
-			return false, nil
-		}
-		return false, err
+	if !p.eligible || !sliceVal.IsValid() || sliceVal.Len() == 0 {
+		return false, nil
 	}
 
 	length := sliceVal.Len()

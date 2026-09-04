@@ -1549,4 +1549,134 @@ func TestContainingStructTypedTabularSlices(t *testing.T) {
 	})
 }
 
+func TestPreflightTabularValidationAndCapacity(t *testing.T) {
+	t.Run("invalid_utf8_in_struct_field_preflight", func(t *testing.T) {
+		type badRow struct {
+			ID   int    `toon:"id"`
+			Name string `toon:"name"`
+		}
+		type container struct {
+			Header string   `toon:"header"`
+			Rows   []badRow `toon:"rows"`
+			Footer string   `toon:"footer"`
+		}
+
+		c := container{
+			Header: "Valid Header",
+			Rows: []badRow{
+				{ID: 1, Name: "Valid Name"},
+				{ID: 2, Name: "Bad\xffName"},
+			},
+			Footer: "Valid Footer",
+		}
+
+		_, err := Marshal(c)
+		if err == nil {
+			t.Fatal("expected error for invalid UTF-8 in struct field, got nil")
+		}
+		if !strings.Contains(err.Error(), "string is not valid UTF-8") {
+			t.Errorf("expected 'string is not valid UTF-8', got %q", err.Error())
+		}
+	})
+
+	t.Run("invalid_utf8_in_root_slice_preflight", func(t *testing.T) {
+		type badRow struct {
+			ID   int    `toon:"id"`
+			Name string `toon:"name"`
+		}
+		rows := []badRow{
+			{ID: 1, Name: "Valid Name"},
+			{ID: 2, Name: "Invalid\xffUTF8"},
+		}
+
+		_, err := Marshal(rows)
+		if err == nil {
+			t.Fatal("expected error for invalid UTF-8 in root slice, got nil")
+		}
+		if !strings.Contains(err.Error(), "string is not valid UTF-8") {
+			t.Errorf("expected 'string is not valid UTF-8', got %q", err.Error())
+		}
+	})
+
+	t.Run("fallback_ineligible_conditions", func(t *testing.T) {
+		type unsupportedRow struct {
+			ID   int       `toon:"id"`
+			Time time.Time `toon:"time"` // unsupported in fast path
+		}
+		type containerWithUnsupported struct {
+			Title string           `toon:"title"`
+			Rows  []unsupportedRow `toon:"rows"`
+		}
+
+		c := containerWithUnsupported{
+			Title: "Fallback",
+			Rows: []unsupportedRow{
+				{ID: 1, Time: time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC)},
+			},
+		}
+
+		got, err := Marshal(c)
+		if err != nil {
+			t.Fatalf("expected clean fallback for unsupported field type, got error: %v", err)
+		}
+		// Generic normalization should emit rows as list items
+		if !strings.Contains(string(got), "title: Fallback") {
+			t.Errorf("expected title in fallback output, got: %s", string(got))
+		}
+	})
+
+	t.Run("encbuffer_capacity_growth_limit_1000rows", func(t *testing.T) {
+		payload := generateTabularPayload(1000)
+		norm, err := normalize(payload, defaultEncoderOptions())
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Initial buffer with default 64-byte capacity
+		buf := newEncBuffer(64)
+		if buf.Cap() != 64 {
+			t.Fatalf("expected initial capacity 64, got %d", buf.Cap())
+		}
+
+		// Grow once with conservative capacity hint from preflight
+		hint := estimateBufferSize(norm)
+		buf.Grow(hint)
+		capAfterGrow := buf.Cap()
+
+		state := &encodeState{
+			cfg: defaultEncoderOptions(),
+			buf: buf,
+		}
+
+		// Encode the 1,000-row document
+		if err := state.encodeRoot(norm); err != nil {
+			t.Fatal(err)
+		}
+
+		finalCap := state.buf.Cap()
+		if finalCap != capAfterGrow {
+			t.Errorf("encBuffer reallocated during encoding: grew from %d to %d (more than once after initialization)", capAfterGrow, finalCap)
+		}
+		if state.buf.Grows() > 1 {
+			t.Errorf("encBuffer.Grow was called %d times, expected <= 1", state.buf.Grows())
+		}
+	})
+
+	t.Run("preflight_zero_allocations", func(t *testing.T) {
+		payload := generateTabularPayload(1000)
+		val := reflect.ValueOf(payload.Users)
+		plan := cachedTabularRowPlan(reflect.TypeOf(BenchmarkRow{}), DelimiterComma)
+
+		allocs := testing.AllocsPerRun(100, func() {
+			ok, est, err := preflightTabularSlice(val, plan)
+			if !ok || est <= 0 || err != nil {
+				t.Fatalf("preflight failed: ok=%v, est=%d, err=%v", ok, est, err)
+			}
+		})
+		if allocs != 0 {
+			t.Errorf("preflightTabularSlice allocated %f times, expected 0", allocs)
+		}
+	})
+}
+
 

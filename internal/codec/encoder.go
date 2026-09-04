@@ -35,17 +35,23 @@ func (e *Encoder) Marshal(v any) ([]byte, error) {
 		}
 		if (val.Kind() == reflect.Slice || val.Kind() == reflect.Array) && val.Type().Elem().Kind() == reflect.Struct {
 			plan := cachedTabularRowPlan(val.Type().Elem(), e.cfg.delimiter)
-			if plan.IsEligible() && val.Len() > 0 {
-				state := &encodeState{
-					cfg: e.cfg,
-					buf: newEncBuffer(val.Len() * len(plan.fields) * 16),
-				}
-				ok, err := plan.appendRows(&state.buf, val, "", 0, e.cfg.indentSize, false)
-				if err != nil {
-					return nil, err
+			if plan.IsEligible() {
+				ok, estBytes, preflightErr := preflightTabularSlice(val, plan)
+				if preflightErr != nil {
+					return nil, preflightErr
 				}
 				if ok {
-					return state.buf.Bytes(), nil
+					state := &encodeState{
+						cfg: e.cfg,
+						buf: newEncBuffer(estBytes),
+					}
+					ok, err := plan.appendRows(&state.buf, val, "", 0, e.cfg.indentSize, false)
+					if err != nil {
+						return nil, err
+					}
+					if ok {
+						return state.buf.Bytes(), nil
+					}
 				}
 			}
 		}
@@ -76,17 +82,23 @@ func (e *Encoder) MarshalString(v any) (string, error) {
 		}
 		if (val.Kind() == reflect.Slice || val.Kind() == reflect.Array) && val.Type().Elem().Kind() == reflect.Struct {
 			plan := cachedTabularRowPlan(val.Type().Elem(), e.cfg.delimiter)
-			if plan.IsEligible() && val.Len() > 0 {
-				state := &encodeState{
-					cfg: e.cfg,
-					buf: newEncBuffer(val.Len() * len(plan.fields) * 16),
-				}
-				ok, err := plan.appendRows(&state.buf, val, "", 0, e.cfg.indentSize, false)
-				if err != nil {
-					return "", err
+			if plan.IsEligible() {
+				ok, estBytes, preflightErr := preflightTabularSlice(val, plan)
+				if preflightErr != nil {
+					return "", preflightErr
 				}
 				if ok {
-					return state.buf.String(), nil
+					state := &encodeState{
+						cfg: e.cfg,
+						buf: newEncBuffer(estBytes),
+					}
+					ok, err := plan.appendRows(&state.buf, val, "", 0, e.cfg.indentSize, false)
+					if err != nil {
+						return "", err
+					}
+					if ok {
+						return state.buf.String(), nil
+					}
 				}
 			}
 		}

@@ -64,7 +64,8 @@ type tabularLayout struct {
 
 // rawTabularSlice encapsulates an eligible slice or array of structs ready for direct tabular emission.
 type rawTabularSlice struct {
-	val  reflect.Value
-	plan *tabularRowPlan
+	val            reflect.Value
+	plan           *tabularRowPlan
+	estimatedBytes int
 }
 
