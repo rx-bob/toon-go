@@ -31,7 +31,7 @@ func NewDecoder(opts ...DecoderOption) *Decoder {
 // Decode parses the provided TOON document.
 func (d *Decoder) Decode(data []byte) (any, error) {
 	if d.cfg.strict && !utf8.Valid(data) {
-		return nil, errors.New("toon: input is not valid UTF-8")
+		return nil, errorAt(invalidUTF8Line(data), "input is not valid UTF-8")
 	}
 	parser, err := newParser(string(data), d.cfg)
 	if err != nil {
@@ -46,7 +46,7 @@ func (d *Decoder) Decode(data []byte) (any, error) {
 
 func (d *Decoder) decodeForUnmarshal(data []byte) (any, error) {
 	if d.cfg.strict && !utf8.Valid(data) {
-		return nil, errors.New("toon: input is not valid UTF-8")
+		return nil, errorAt(invalidUTF8Line(data), "input is not valid UTF-8")
 	}
 	parser, err := newParser(string(data), d.cfg)
 	if err != nil {
@@ -54,6 +54,21 @@ func (d *Decoder) decodeForUnmarshal(data []byte) (any, error) {
 	}
 	parser.preserveNumbers = true
 	return parser.parseDocument()
+}
+
+func invalidUTF8Line(data []byte) int {
+	line := 1
+	for i := 0; i < len(data); {
+		r, size := utf8.DecodeRune(data[i:])
+		if r == utf8.RuneError && size == 1 {
+			return line
+		}
+		if data[i] == '\n' {
+			line++
+		}
+		i += size
+	}
+	return line
 }
 
 // DecodeString is a convenience wrapper around Decode.
