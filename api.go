@@ -1,5 +1,6 @@
-// Package toon implements the Token-Oriented Object Notation (TOON)
-// encoder and decoder described in docs/SPEC.md. TOON is a compact,
+// Package toon implements toon-spec 4.1 of the Token-Oriented Object Notation
+// (TOON) encoder and decoder described in tests/spec/SPEC.md. The tested
+// specification revision is v4.1.1. TOON is a compact,
 // human-readable serialization format targeting LLM workflows where predictable
 // structure and reduced token counts are important. The package exposes a small
 // public API while keeping implementation details inside internal packages.
@@ -45,7 +46,7 @@ func NewObject(fields ...Field) Object {
 type Encoder = codec.Encoder
 
 // NewEncoder constructs an Encoder using the supplied options. Absent options
-// default to the TOON Core Profile recommendations (Section 19).
+// use the canonical v4.1 defaults.
 func NewEncoder(opts ...EncoderOption) *Encoder {
 	return codec.NewEncoder(opts...)
 }
@@ -65,19 +66,29 @@ func WithIndent(spaces int) EncoderOption {
 	return codec.WithIndent(spaces)
 }
 
-// WithDocumentDelimiter configures the delimiter that influences quoting
-// decisions outside array scopes.
+// WithDocumentDelimiter is deprecated; use WithDelimiter.
+//
+// Deprecated: use WithDelimiter.
 func WithDocumentDelimiter(delimiter Delimiter) EncoderOption {
 	return codec.WithDocumentDelimiter(delimiter)
 }
 
-// WithArrayDelimiter configures the default delimiter declared for arrays that
-// do not explicitly override the active delimiter.
+// WithDelimiter configures the delimiter used by all array scopes.
+func WithDelimiter(delimiter Delimiter) EncoderOption {
+	return codec.WithDelimiter(delimiter)
+}
+
+// WithArrayDelimiter is deprecated; use WithDelimiter.
+//
+// Deprecated: use WithDelimiter.
 func WithArrayDelimiter(delimiter Delimiter) EncoderOption {
 	return codec.WithArrayDelimiter(delimiter)
 }
 
-// WithLengthMarkers enables emitting optional # markers in array headers.
+// WithLengthMarkers is deprecated and has no effect. v4.1 never emits legacy
+// # length markers.
+//
+// Deprecated: length markers are not part of toon-spec 4.1.
 func WithLengthMarkers(enabled bool) EncoderOption {
 	return codec.WithLengthMarkers(enabled)
 }
@@ -103,6 +114,8 @@ func Decode(data []byte, opts ...DecoderOption) (any, error) {
 }
 
 // DecodeString parses a TOON document string using a temporary decoder.
+// Unlike Decode, it receives an already-decoded host string and does not
+// perform byte-level UTF-8 validation.
 func DecodeString(s string, opts ...DecoderOption) (any, error) {
 	return codec.DecodeString(s, opts...)
 }
@@ -112,7 +125,8 @@ func WithStrictMode(strict bool) DecoderOption {
 	return codec.WithStrictMode(strict)
 }
 
-// WithDecoderIndent configures the expected indentation step.
+// WithDecoderIndent configures the expected indentation step in spaces. In
+// non-strict mode, leading tabs are accepted using the configured step.
 func WithDecoderIndent(spaces int) DecoderOption {
 	return codec.WithDecoderIndent(spaces)
 }

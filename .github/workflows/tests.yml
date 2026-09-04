@@ -19,6 +19,11 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Verify pinned specification
+        run: |
+          test "$(git -C tests/spec rev-parse HEAD)" = "62f16b369408180f1faf1cba7da1b46d1f336f12"
+          test "$(git -C tests/spec describe --tags --exact-match)" = "v4.1.1"
+
       - name: Set up Go ${{ matrix.go-version }}
         uses: actions/setup-go@v5
         with:
@@ -28,16 +33,70 @@ jobs:
         run: go mod download
 
       - name: Run tests
-        run: go test ./... -coverprofile=coverage.out -covermode=atomic
+        run: go test ./... -count=1 -coverpkg=./... -coverprofile=coverage.out -covermode=atomic
 
       - name: View coverage
         run: go tool cover -func=coverage.out
+
+      - name: Require implementation coverage
+        run: |
+          go tool cover -func=coverage.out | awk '/^total:/ { found=1; if ($3 == "0.0%") exit 1 } END { if (!found) exit 1 }'
 
       - name: Upload coverage artifact
         uses: actions/upload-artifact@v4
         with:
           name: coverage-${{ matrix.go-version }}
           path: coverage.out
+
+  conformance:
+    name: Pinned fixture suite
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Verify pinned specification
+        run: |
+          test "$(git -C tests/spec rev-parse HEAD)" = "62f16b369408180f1faf1cba7da1b46d1f336f12"
+          test "$(git -C tests/spec describe --tags --exact-match)" = "v4.1.1"
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: stable
+
+      - name: Run complete fixture suite
+        run: go test ./tests -run '^TestSpec(Encode|Decode)Fixtures$' -count=1
+
+  quality:
+    name: Vet, format, and race
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Verify pinned specification
+        run: |
+          test "$(git -C tests/spec rev-parse HEAD)" = "62f16b369408180f1faf1cba7da1b46d1f336f12"
+          test "$(git -C tests/spec describe --tags --exact-match)" = "v4.1.1"
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: stable
+
+      - name: Check formatting
+        run: test -z "$(gofmt -l $(git ls-files '*.go'))"
+
+      - name: Run vet
+        run: go vet ./...
+
+      - name: Run race tests
+        run: go test -race ./... -count=1
 
   lint:
     name: Lint
@@ -47,6 +106,11 @@ jobs:
       - uses: actions/checkout@v5
         with:
           submodules: recursive
+
+      - name: Verify pinned specification
+        run: |
+          test "$(git -C tests/spec rev-parse HEAD)" = "62f16b369408180f1faf1cba7da1b46d1f336f12"
+          test "$(git -C tests/spec describe --tags --exact-match)" = "v4.1.1"
 
       - name: Set up Go
         uses: actions/setup-go@v6

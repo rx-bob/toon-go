@@ -2,8 +2,11 @@ package format
 
 import (
 	"fmt"
+	"math"
+	"regexp"
+	"strconv"
 	"strings"
-	"unicode"
+	"unicode/utf8"
 )
 
 // Context captures delimiter information for quoting decisions.
@@ -29,7 +32,7 @@ func NeedsQuoting(s string, ctx Context) bool {
 	if len(s) == 0 {
 		return true
 	}
-	if strings.TrimSpace(s) != s {
+	if s[0] == ' ' || s[0] == '\t' || s[len(s)-1] == ' ' || s[len(s)-1] == '\t' {
 		return true
 	}
 	switch s {
@@ -48,7 +51,12 @@ func NeedsQuoting(s string, ctx Context) bool {
 	if strings.ContainsRune(s, '\n') || strings.ContainsRune(s, '\r') || strings.ContainsRune(s, '\t') {
 		return true
 	}
-	if strings.HasPrefix(s, "-") {
+	for _, r := range s {
+		if r < 0x20 {
+			return true
+		}
+	}
+	if strings.HasPrefix(s, "-") || strings.HasPrefix(s, "#") {
 		return true
 	}
 	if ctx.InArray && ctx.Active != 0 && strings.ContainsRune(s, ctx.Active) {
@@ -79,7 +87,8 @@ func QuoteString(s string) (string, error) {
 			b.WriteString("\\t")
 		default:
 			if r < 0x20 {
-				return "", fmt.Errorf("toon: unsupported control character U+%04X in string", r)
+				fmt.Fprintf(&b, `\u%04x`, r)
+				continue
 			}
 			b.WriteRune(r)
 		}
@@ -90,10 +99,8 @@ func QuoteString(s string) (string, error) {
 
 // ValidateCharacters ensures the string does not contain unsupported control characters.
 func ValidateCharacters(s string) error {
-	for _, r := range s {
-		if r < 0x20 && r != '\n' && r != '\r' && r != '\t' {
-			return fmt.Errorf("toon: unsupported control character U+%04X in string", r)
-		}
+	if !utf8.ValidString(s) {
+		return fmt.Errorf("toon: string is not valid UTF-8")
 	}
 	return nil
 }
@@ -104,7 +111,7 @@ func LooksNumeric(s string) bool {
 		return false
 	}
 	i := 0
-	if s[0] == '-' {
+	if s[0] == '-' || s[0] == '+' {
 		i++
 		if i == len(s) {
 			return false
@@ -169,18 +176,61 @@ func IsValidUnquotedKey(key string) bool {
 	if key == "" {
 		return false
 	}
-	for pos, r := range key {
-		if pos == 0 {
-			if r != '_' && !unicode.IsLetter(r) {
+	for i := 0; i < len(key); i++ {
+		c := key[i]
+		if i == 0 {
+			if c != '_' && (c < 'A' || c > 'Z') && (c < 'a' || c > 'z') {
 				return false
 			}
-			continue
-		}
-		if !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_' && r != '.' {
+		} else if c != '_' && c != '.' && (c < 'A' || c > 'Z') && (c < 'a' || c > 'z') && (c < '0' || c > '9') {
 			return false
 		}
 	}
 	return true
+}
+
+var decoderNumber = regexp.MustCompile(`^-?[0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?$`)
+
+// FormatNumber emits the deterministic v4.1 canonical representation.
+func FormatNumber(f float64) string {
+	if f == 0 {
+		return "0"
+	}
+	abs := math.Abs(f)
+	if abs >= 1e-6 && abs < 1e21 {
+		return strconv.FormatFloat(f, 'f', -1, 64)
+	}
+	s := strconv.FormatFloat(f, 'e', -1, 64)
+	i := strings.IndexByte(s, 'e')
+	exp := s[i+1:]
+	sign := "+"
+	if exp[0] == '+' || exp[0] == '-' {
+		sign, exp = exp[:1], exp[1:]
+	}
+	exp = strings.TrimLeft(exp, "0")
+	if exp == "" {
+		exp = "0"
+	}
+	return s[:i] + "e" + sign + exp
+}
+
+// ParseNumber recognizes exactly the v4.1 decoder number grammar.
+func ParseNumber(token string) (float64, bool) {
+	if !decoderNumber.MatchString(token) {
+		return 0, false
+	}
+	digits := strings.TrimPrefix(token, "-")
+	if len(digits) > 1 && digits[0] == '0' && digits[1] >= '0' && digits[1] <= '9' {
+		return 0, false
+	}
+	f, err := strconv.ParseFloat(token, 64)
+	if err != nil {
+		return 0, false
+	}
+	if f == 0 {
+		return 0, true
+	}
+	return f, true
 }
 
 func isDigit(b byte) bool {

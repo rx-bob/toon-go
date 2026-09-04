@@ -24,10 +24,14 @@ func TestUnmarshalNonPointer(t *testing.T) {
 	}
 }
 
-func TestDecodeInvalidKey(t *testing.T) {
+func TestDecodeLiteralKeyOutsideEncoderPattern(t *testing.T) {
 	doc := "1invalid: value"
-	if _, err := toon.DecodeString(doc); err == nil {
-		t.Fatalf("expected invalid key error")
+	value, err := toon.DecodeString(doc)
+	if err != nil {
+		t.Fatalf("decode literal key: %v", err)
+	}
+	if got := value.(map[string]any)["1invalid"]; got != "value" {
+		t.Fatalf("decoded value = %#v, want value", got)
 	}
 }
 

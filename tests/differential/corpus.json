@@ -1,0 +1,34 @@
+[
+  {
+    "name": "object and empty array",
+    "input": {"active": true, "empty": [], "name": "Ada"},
+    "toon": "active: true\nempty: []\nname: Ada"
+  },
+  {
+    "name": "primitive and nested list arrays",
+    "input": {"tags": ["reading", "gaming", "coding"], "values": ["ready", {"id": 1}, ["a", "b"]]},
+    "toon": "tags[3]: reading,gaming,coding\nvalues[3]:\n  - ready\n  - id: 1\n  - [2]: a,b"
+  },
+  {
+    "name": "nested tabular groups",
+    "input": {"orders": [{"customer": {"country": "DK", "name": "Ada"}, "id": 1, "total": 99}, {"customer": {"country": "UK", "name": "Bob"}, "id": 2, "total": 149}]},
+    "toon": "orders[2]{customer{country,name},id,total}:\n  DK,Ada,1,99\n  UK,Bob,2,149"
+  },
+  {
+    "name": "keyed tabular object",
+    "input": {"servers": {"alpha": {"host": "a.example.com", "port": 8080}, "beta": {"host": "b.example.com", "port": 9090}}},
+    "toon": "servers[2:]{host,port}:\n  alpha: a.example.com,8080\n  beta: b.example.com,9090"
+  },
+  {
+    "name": "pipe delimiter and unicode",
+    "input": {"items": [{"label": "café|東京", "ok": true}, {"label": "plain", "ok": false}]},
+    "toon": "items[2|]{label|ok}:\n  \"café|東京\"|true\n  plain|false",
+    "delimiter": "|"
+  },
+  {
+    "name": "tab delimiter and numeric boundaries",
+    "input": {"numbers": [0, -0.25, 9007199254740991]},
+    "toon": "numbers[3\t]: 0\t-0.25\t9007199254740991",
+    "delimiter": "\t"
+  }
+]

@@ -69,7 +69,7 @@ func TestMarshalDelimitersAndLengthMarkers(t *testing.T) {
 	}
 
 	expectLines(t, doc,
-		"users[#1|]{id|name|active}:",
+		"users[1|]{id|name|active}:",
 		"  1|Ada|true",
 		"count: 1",
 	)

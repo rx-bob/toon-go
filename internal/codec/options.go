@@ -47,18 +47,15 @@ func (d Delimiter) rune() rune {
 type EncoderOption func(*encoderOptions)
 
 type encoderOptions struct {
-	indentSize         int
-	documentDelimiter  Delimiter
-	arrayDelimiter     Delimiter
-	includeLengthMarks bool
-	timeFormatter      func(time.Time) string
+	indentSize    int
+	delimiter     Delimiter
+	timeFormatter func(time.Time) string
 }
 
 func defaultEncoderOptions() encoderOptions {
 	return encoderOptions{
-		indentSize:        2,
-		documentDelimiter: DelimiterComma,
-		arrayDelimiter:    DelimiterComma,
+		indentSize: 2,
+		delimiter:  DelimiterComma,
 		timeFormatter: func(t time.Time) string {
 			return t.UTC().Format(time.RFC3339Nano)
 		},
@@ -74,31 +71,29 @@ func WithIndent(spaces int) EncoderOption {
 	}
 }
 
-// WithDocumentDelimiter configures the delimiter that influences quoting
-// decisions outside array scopes.
+// WithDelimiter configures the document delimiter used by all array scopes.
+func WithDelimiter(delimiter Delimiter) EncoderOption {
+	return func(o *encoderOptions) {
+		if delimiter == DelimiterComma || delimiter == DelimiterTab || delimiter == DelimiterPipe {
+			o.delimiter = delimiter
+		}
+	}
+}
+
+// WithDocumentDelimiter is deprecated; use WithDelimiter.
 func WithDocumentDelimiter(delimiter Delimiter) EncoderOption {
-	return func(o *encoderOptions) {
-		if delimiter == DelimiterComma || delimiter == DelimiterTab || delimiter == DelimiterPipe {
-			o.documentDelimiter = delimiter
-		}
-	}
+	return WithDelimiter(delimiter)
 }
 
-// WithArrayDelimiter configures the default delimiter declared for arrays that
-// do not explicitly override the active delimiter.
+// WithArrayDelimiter is deprecated; use WithDelimiter.
 func WithArrayDelimiter(delimiter Delimiter) EncoderOption {
-	return func(o *encoderOptions) {
-		if delimiter == DelimiterComma || delimiter == DelimiterTab || delimiter == DelimiterPipe {
-			o.arrayDelimiter = delimiter
-		}
-	}
+	return WithDelimiter(delimiter)
 }
 
-// WithLengthMarkers enables emitting optional # markers in array headers.
+// WithLengthMarkers is deprecated and has no effect. v4.1 headers never emit
+// legacy # length markers.
 func WithLengthMarkers(enabled bool) EncoderOption {
-	return func(o *encoderOptions) {
-		o.includeLengthMarks = enabled
-	}
+	return func(*encoderOptions) {}
 }
 
 // WithTimeFormatter specifies the formatter used for time.Time normalization.
@@ -134,7 +129,9 @@ func WithStrictMode(strict bool) DecoderOption {
 	}
 }
 
-// WithDecoderIndent configures the expected indentation step.
+// WithDecoderIndent configures the expected indentation step in spaces. In
+// non-strict mode, leading tabs are accepted and each tab contributes one
+// indentation level at the configured step.
 func WithDecoderIndent(spaces int) DecoderOption {
 	return func(o *decoderOptions) {
 		if spaces > 0 {

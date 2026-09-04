@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/big"
 	"reflect"
 )
 
@@ -11,14 +12,11 @@ import (
 // pointer. Struct fields use `toon` struct tags for naming and omitempty
 // semantics, mirroring Marshal behaviour.
 func Unmarshal(data []byte, v any, opts ...DecoderOption) error {
-	if v == nil {
-		return errors.New("toon: Unmarshal nil target")
+	rv, err := validateUnmarshalTarget(v)
+	if err != nil {
+		return err
 	}
-	rv := reflect.ValueOf(v)
-	if rv.Kind() != reflect.Pointer || rv.IsNil() {
-		return errors.New("toon: Unmarshal target must be a non-nil pointer")
-	}
-	decoded, err := Decode(data, opts...)
+	decoded, err := NewDecoder(opts...).decodeForUnmarshal(data)
 	if err != nil {
 		return err
 	}
@@ -27,7 +25,26 @@ func Unmarshal(data []byte, v any, opts ...DecoderOption) error {
 
 // UnmarshalString decodes the TOON document in s into v.
 func UnmarshalString(s string, v any, opts ...DecoderOption) error {
-	return Unmarshal([]byte(s), v, opts...)
+	rv, err := validateUnmarshalTarget(v)
+	if err != nil {
+		return err
+	}
+	decoded, err := NewDecoder(opts...).decodeStringForUnmarshal(s)
+	if err != nil {
+		return err
+	}
+	return assignValue(rv.Elem(), decoded)
+}
+
+func validateUnmarshalTarget(v any) (reflect.Value, error) {
+	if v == nil {
+		return reflect.Value{}, errors.New("toon: Unmarshal nil target")
+	}
+	rv := reflect.ValueOf(v)
+	if rv.Kind() != reflect.Pointer || rv.IsNil() {
+		return reflect.Value{}, errors.New("toon: Unmarshal target must be a non-nil pointer")
+	}
+	return rv, nil
 }
 
 func assignValue(dst reflect.Value, src any) error {
@@ -39,6 +56,14 @@ func assignValue(dst reflect.Value, src any) error {
 	case reflect.Interface:
 		if src == nil {
 			dst.SetZero()
+			return nil
+		}
+		if number, ok := src.(decodedNumber); ok {
+			if math.IsInf(number.value, 0) || math.IsNaN(number.value) {
+				dst.Set(reflect.ValueOf(number.literal))
+			} else {
+				dst.Set(reflect.ValueOf(number.value))
+			}
 			return nil
 		}
 		dst.Set(reflect.ValueOf(src))
@@ -141,11 +166,28 @@ func assignValue(dst reflect.Value, src any) error {
 		return fmt.Errorf("toon: cannot assign %T to bool", src)
 	case reflect.Float32, reflect.Float64:
 		if num, ok := toFloat64(src); ok {
+			if (math.IsInf(num, 0) || math.IsNaN(num)) && srcNumberIsExact(src) {
+				return fmt.Errorf("toon: number %v is not representable as %s", num, dst.Type())
+			}
 			dst.SetFloat(num)
 			return nil
 		}
 		return fmt.Errorf("toon: cannot assign %T to float", src)
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		if exact, ok := exactInteger(src); ok {
+			if !exact.IsInt64() {
+				return fmt.Errorf("toon: integer %s overflows %s", exact.String(), dst.Type())
+			}
+			intVal := exact.Int64()
+			if dst.OverflowInt(intVal) {
+				return fmt.Errorf("toon: integer %s overflows %s", exact.String(), dst.Type())
+			}
+			dst.SetInt(intVal)
+			return nil
+		}
+		if _, exactNumber := src.(decodedNumber); exactNumber {
+			return fmt.Errorf("toon: cannot assign non-integer %v to %s", src, dst.Type())
+		}
 		if num, ok := toFloat64(src); ok {
 			if math.Trunc(num) != num {
 				return fmt.Errorf("toon: cannot assign non-integer %v to %s", num, dst.Type())
@@ -159,6 +201,20 @@ func assignValue(dst reflect.Value, src any) error {
 		}
 		return fmt.Errorf("toon: cannot assign %T to int", src)
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		if exact, ok := exactInteger(src); ok {
+			if exact.Sign() < 0 || !exact.IsUint64() {
+				return fmt.Errorf("toon: integer %s overflows %s", exact.String(), dst.Type())
+			}
+			uintVal := exact.Uint64()
+			if dst.OverflowUint(uintVal) {
+				return fmt.Errorf("toon: integer %s overflows %s", exact.String(), dst.Type())
+			}
+			dst.SetUint(uintVal)
+			return nil
+		}
+		if _, exactNumber := src.(decodedNumber); exactNumber {
+			return fmt.Errorf("toon: cannot assign non-integer %v to %s", src, dst.Type())
+		}
 		if num, ok := toFloat64(src); ok {
 			if math.Trunc(num) != num {
 				return fmt.Errorf("toon: cannot assign non-integer %v to %s", num, dst.Type())
@@ -181,6 +237,8 @@ func assignValue(dst reflect.Value, src any) error {
 
 func toFloat64(v any) (float64, bool) {
 	switch num := v.(type) {
+	case decodedNumber:
+		return num.value, true
 	case float64:
 		return num, true
 	case float32:
@@ -208,4 +266,21 @@ func toFloat64(v any) (float64, bool) {
 	default:
 		return 0, false
 	}
+}
+
+func exactInteger(v any) (*big.Int, bool) {
+	num, ok := v.(decodedNumber)
+	if !ok {
+		return nil, false
+	}
+	rational, ok := exactNumberRat(num.literal)
+	if !ok || !rational.IsInt() {
+		return nil, false
+	}
+	return new(big.Int).Set(rational.Num()), true
+}
+
+func srcNumberIsExact(v any) bool {
+	_, ok := v.(decodedNumber)
+	return ok
 }

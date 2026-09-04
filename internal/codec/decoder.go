@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	formatpkg "github.com/toon-format/toon-go/internal/format"
 	parsepkg "github.com/toon-format/toon-go/internal/parse"
@@ -29,6 +30,9 @@ func NewDecoder(opts ...DecoderOption) *Decoder {
 
 // Decode parses the provided TOON document.
 func (d *Decoder) Decode(data []byte) (any, error) {
+	if d.cfg.strict && !utf8.Valid(data) {
+		return nil, errorAt(invalidUTF8Line(data), "input is not valid UTF-8")
+	}
 	parser, err := newParser(string(data), d.cfg)
 	if err != nil {
 		return nil, err
@@ -40,9 +44,49 @@ func (d *Decoder) Decode(data []byte) (any, error) {
 	return value, nil
 }
 
+func (d *Decoder) decodeForUnmarshal(data []byte) (any, error) {
+	if d.cfg.strict && !utf8.Valid(data) {
+		return nil, errorAt(invalidUTF8Line(data), "input is not valid UTF-8")
+	}
+	parser, err := newParser(string(data), d.cfg)
+	if err != nil {
+		return nil, err
+	}
+	parser.preserveNumbers = true
+	return parser.parseDocument()
+}
+
+func invalidUTF8Line(data []byte) int {
+	line := 1
+	for i := 0; i < len(data); {
+		r, size := utf8.DecodeRune(data[i:])
+		if r == utf8.RuneError && size == 1 {
+			return line
+		}
+		if data[i] == '\n' {
+			line++
+		}
+		i += size
+	}
+	return line
+}
+
 // DecodeString is a convenience wrapper around Decode.
 func (d *Decoder) DecodeString(doc string) (any, error) {
-	return d.Decode([]byte(doc))
+	parser, err := newParser(doc, d.cfg)
+	if err != nil {
+		return nil, err
+	}
+	return parser.parseDocument()
+}
+
+func (d *Decoder) decodeStringForUnmarshal(doc string) (any, error) {
+	parser, err := newParser(doc, d.cfg)
+	if err != nil {
+		return nil, err
+	}
+	parser.preserveNumbers = true
+	return parser.parseDocument()
 }
 
 // Decode uses a temporary decoder configured with opts.
@@ -56,10 +100,20 @@ func DecodeString(s string, opts ...DecoderOption) (any, error) {
 }
 
 type parser struct {
-	lines []parsedLine
-	pos   int
-	cfg   decoderOptions
+	lines             []parsedLine
+	pos               int
+	cfg               decoderOptions
+	preserveNumbers   bool
+	remainingNonBlank []int
+	nextNonBlank      []int
 }
+
+// These limits protect recursive parsing and header bookkeeping from hostile
+// input. They are implementation safeguards, not a format-level restriction.
+const (
+	maxDecodeDepth = 64
+	maxHeaderBytes = 64 * 1024
+)
 
 type parsedLine struct {
 	number  int
@@ -70,45 +124,86 @@ type parsedLine struct {
 }
 
 func newParser(input string, cfg decoderOptions) (*parser, error) {
-	rawLines := splitLines(input)
+	rawLines := scanLines(input)
 	lines := make([]parsedLine, 0, len(rawLines))
-	for idx, raw := range rawLines {
-		if raw == "" {
-			lines = append(lines, parsedLine{
-				number:  idx + 1,
-				indent:  0,
-				content: "",
-				raw:     "",
-				blank:   true,
-			})
+	for _, scanned := range rawLines {
+		if scanned.comment {
 			continue
 		}
-		indent, content, err := computeIndent(raw, cfg)
+		indent, content, err := computeIndent(scanned.text, cfg)
 		if err != nil {
-			return nil, errorWrap(idx+1, err)
+			return nil, errorWrap(scanned.number, err)
 		}
 		lines = append(lines, parsedLine{
-			number:  idx + 1,
+			number:  scanned.number,
 			indent:  indent,
 			content: content,
-			raw:     raw,
-			blank:   strings.TrimSpace(content) == "",
+			raw:     scanned.text,
+			blank:   content == "",
 		})
 	}
+	remainingNonBlank := make([]int, len(lines)+1)
+	nextNonBlank := make([]int, len(lines)+1)
+	for i := len(lines) - 1; i >= 0; i-- {
+		remainingNonBlank[i] = remainingNonBlank[i+1]
+		if !lines[i].blank {
+			remainingNonBlank[i]++
+			nextNonBlank[i] = lines[i].indent
+		} else {
+			nextNonBlank[i] = nextNonBlank[i+1]
+		}
+	}
 	return &parser{
-		lines: lines,
-		cfg:   cfg,
+		lines:             lines,
+		cfg:               cfg,
+		remainingNonBlank: remainingNonBlank,
+		nextNonBlank:      nextNonBlank,
 	}, nil
 }
 
-func splitLines(input string) []string {
-	input = strings.ReplaceAll(input, "\r\n", "\n")
-	lines := strings.Split(input, "\n")
-	// Drop trailing empty line caused by final newline.
-	if len(lines) > 0 && lines[len(lines)-1] == "" {
-		lines = lines[:len(lines)-1]
+type scannedLine struct {
+	number  int
+	text    string
+	comment bool
+}
+
+// scanLines is the document pre-pass. It preserves original line numbers,
+// removes comments before indentation validation, and performs only the
+// whitespace normalization allowed by the TOON grammar.
+func scanLines(input string) []scannedLine {
+	if strings.HasPrefix(input, "\ufeff") {
+		input = input[len("\ufeff"):]
+	}
+	lines := make([]scannedLine, 0)
+	start, number := 0, 1
+	for i := 0; i < len(input); i++ {
+		if input[i] != '\n' && input[i] != '\r' {
+			continue
+		}
+		lines = append(lines, makeScannedLine(number, input[start:i]))
+		number++
+		if input[i] == '\r' && i+1 < len(input) && input[i+1] == '\n' {
+			i++
+		}
+		start = i + 1
+	}
+	if start < len(input) {
+		lines = append(lines, makeScannedLine(number, input[start:]))
 	}
 	return lines
+}
+
+func makeScannedLine(number int, line string) scannedLine {
+	line = strings.TrimRight(line, " ")
+	comment := false
+	for i := 0; i < len(line); i++ {
+		if line[i] == ' ' {
+			continue
+		}
+		comment = line[i] == '#'
+		break
+	}
+	return scannedLine{number: number, text: line, comment: comment}
 }
 
 func computeIndent(line string, cfg decoderOptions) (int, string, error) {
@@ -121,7 +216,10 @@ func computeIndent(line string, cfg decoderOptions) (int, string, error) {
 			if cfg.strict {
 				return 0, "", errors.New("tabs are not allowed in indentation (strict mode)")
 			}
-			indent++
+			// Non-strict mode treats a tab as one indentation level. This keeps
+			// tab-indented data usable without allowing it to collapse to depth 0
+			// when indentSize is greater than one.
+			indent += cfg.indentSize
 		default:
 			content := line[i:]
 			if cfg.strict && indent%cfg.indentSize != 0 {
@@ -143,14 +241,19 @@ func (p *parser) parseDocument() (any, error) {
 	nonBlank := p.countRemainingNonBlank()
 	first := p.current()
 
-	header, ok, err := tryParseHeader(first.content)
+	header, ok, err := p.parseHeader(first)
 	if err != nil {
 		return nil, errorWrap(first.number, err)
 	}
 
-	if nonBlank == 1 && !ok && !isKeyValue(first.content) {
-		token := strings.TrimSpace(first.content)
-		value, err := decodePrimitiveToken(token)
+	if first.indent == 0 && first.content == "[]" {
+		p.pos++
+		return p.finishRoot([]any{})
+	}
+
+	if nonBlank == 1 && first.indent == 0 && !ok && !isKeyValue(first.content) {
+		token := trimSpaces(first.content)
+		value, err := p.decodePrimitiveToken(token)
 		if err != nil {
 			return nil, errorWrap(first.number, err)
 		}
@@ -158,16 +261,52 @@ func (p *parser) parseDocument() (any, error) {
 		return value, nil
 	}
 
-	if ok && first.indent == 0 && header.key == "" {
+	if ok && first.indent == 0 && !header.keyPresent {
 		p.pos++
-		return p.parseArray(header, 0)
+		if header.keyed {
+			value, err := p.parseKeyedObject(header, 0)
+			if err != nil {
+				return nil, err
+			}
+			return p.finishRoot(value)
+		}
+		value, err := p.parseArray(header, 0)
+		if err != nil {
+			return nil, err
+		}
+		return p.finishRoot(value)
 	}
 
 	return p.parseObject(0)
 }
 
+// finishRoot enforces the root-form boundary after a root array has been
+// parsed. Non-strict mode permits trailing content, but it is never consumed
+// as part of the completed root value.
+func (p *parser) finishRoot(value any) (any, error) {
+	p.skipBlankLinesOutsideArrays()
+	if p.pos >= len(p.lines) {
+		return value, nil
+	}
+	if p.cfg.strict {
+		return nil, errorAt(p.current().number, "trailing content after root value")
+	}
+	// Non-strict mode may ignore trailing structural content, but a scalar
+	// line is never valid outside root-primitive position.
+	for _, line := range p.lines[p.pos:] {
+		if !line.blank && !isKeyValue(line.content) {
+			return nil, errorAt(line.number, "scalar line outside root primitive position")
+		}
+	}
+	return value, nil
+}
+
 func (p *parser) parseObject(depth int) (map[string]any, error) {
+	if err := p.checkDepth(depth); err != nil {
+		return nil, err
+	}
 	result := make(map[string]any)
+	seen := make(map[string]struct{})
 	for p.pos < len(p.lines) {
 		line := p.current()
 		if line.blank {
@@ -180,20 +319,27 @@ func (p *parser) parseObject(depth int) (map[string]any, error) {
 		if line.indent > depth {
 			return nil, errorAt(line.number, "unexpected indentation")
 		}
-		header, isHeader, err := tryParseHeader(line.content)
+		header, isHeader, err := p.parseHeader(line)
 		if err != nil {
 			return nil, errorWrap(line.number, err)
 		}
 		if isHeader {
-			if header.key == "" {
+			if !header.keyPresent {
 				return nil, errorAt(line.number, "arrays within objects must have a key")
 			}
 			p.pos++
-			value, err := p.parseArray(header, depth)
+			var value any
+			if header.keyed {
+				value, err = p.parseKeyedObject(header, depth)
+			} else {
+				value, err = p.parseArray(header, depth)
+			}
 			if err != nil {
 				return nil, err
 			}
-			result[header.key] = value
+			if err := p.setObjectField(result, seen, header.key, value, line.number); err != nil {
+				return nil, err
+			}
 			continue
 		}
 
@@ -207,20 +353,41 @@ func (p *parser) parseObject(depth int) (map[string]any, error) {
 			if err != nil {
 				return nil, err
 			}
-			result[key] = nextValue
+			if err := p.setObjectField(result, seen, key, nextValue, line.number); err != nil {
+				return nil, err
+			}
 			continue
 		}
 
-		value, err := decodePrimitiveToken(rest)
-		if err != nil {
-			return nil, errorWrap(line.number, err)
+		var value any
+		if rest == "[]" {
+			value = []any{}
+		} else {
+			value, err = p.decodePrimitiveToken(rest)
+			if err != nil {
+				return nil, errorWrap(line.number, err)
+			}
 		}
-		result[key] = value
+		if err := p.setObjectField(result, seen, key, value, line.number); err != nil {
+			return nil, err
+		}
 	}
 	return result, nil
 }
 
+func (p *parser) setObjectField(obj map[string]any, seen map[string]struct{}, key string, value any, line int) error {
+	if _, exists := seen[key]; exists && p.cfg.strict {
+		return errorAtf(line, "duplicate object key %q", key)
+	}
+	seen[key] = struct{}{}
+	obj[key] = value
+	return nil
+}
+
 func (p *parser) parseArray(header parsedHeader, depth int) (any, error) {
+	if err := p.checkDepth(depth); err != nil {
+		return nil, err
+	}
 	delimiter := header.delimiter.rune()
 	var values []any
 	ctx := p.cfg
@@ -231,7 +398,7 @@ func (p *parser) parseArray(header parsedHeader, depth int) (any, error) {
 			return nil, errorWrap(p.lines[p.pos-1].number, err)
 		}
 		for _, token := range raw {
-			value, err := decodePrimitiveToken(token)
+			value, err := p.decodePrimitiveToken(token)
 			if err != nil {
 				return nil, errorWrap(p.lines[p.pos-1].number, err)
 			}
@@ -243,12 +410,16 @@ func (p *parser) parseArray(header parsedHeader, depth int) (any, error) {
 		return values, nil
 	}
 
-	if len(header.fields) > 0 {
-		rows := make([]any, 0, header.length)
+	if len(header.leafFields) > 0 {
+		rows := make([]any, 0)
 		for p.pos < len(p.lines) {
 			line := p.current()
 			if line.blank {
 				if ctx.strict {
+					if len(rows) == 0 {
+						p.pos++
+						continue
+					}
 					if nextIndent, ok := p.nextNonBlankIndent(p.pos); !ok || nextIndent <= depth {
 						break
 					}
@@ -263,8 +434,10 @@ func (p *parser) parseArray(header parsedHeader, depth int) (any, error) {
 			if line.indent != depth+1 {
 				return nil, errorAt(line.number, "invalid indentation for tabular row")
 			}
-			trimmed := strings.TrimSpace(line.content)
-			if indexOutsideQuotes(trimmed, ':') != -1 {
+			trimmed := trimSpaces(line.content)
+			colon := indexOutsideQuotes(trimmed, ':')
+			separator := indexOutsideQuotes(trimmed, delimiter)
+			if colon >= 0 && (separator < 0 || colon < separator) {
 				break
 			}
 			p.pos++
@@ -272,19 +445,12 @@ func (p *parser) parseArray(header parsedHeader, depth int) (any, error) {
 			if err != nil {
 				return nil, errorWrap(line.number, err)
 			}
-			if ctx.strict && len(raw) != len(header.fields) {
+			if ctx.strict && len(raw) != len(header.leafFields) {
 				return nil, errorAt(line.number, "tabular row width mismatch")
 			}
-			row := make(map[string]any, len(header.fields))
-			for idx, field := range header.fields {
-				if idx >= len(raw) {
-					break
-				}
-				value, err := decodePrimitiveToken(raw[idx])
-				if err != nil {
-					return nil, errorWrap(line.number, err)
-				}
-				row[field] = value
+			row, err := decodeTabularRow(header.fieldTree, raw)
+			if err != nil {
+				return nil, errorWrap(line.number, err)
 			}
 			rows = append(rows, row)
 			if ctx.strict && len(rows) > header.length {
@@ -297,11 +463,15 @@ func (p *parser) parseArray(header parsedHeader, depth int) (any, error) {
 		return rows, nil
 	}
 
-	values = make([]any, 0, header.length)
+	values = make([]any, 0)
 	for p.pos < len(p.lines) {
 		line := p.current()
 		if line.blank {
 			if ctx.strict {
+				if len(values) == 0 {
+					p.pos++
+					continue
+				}
 				if nextIndent, ok := p.nextNonBlankIndent(p.pos); !ok || nextIndent <= depth {
 					break
 				}
@@ -319,7 +489,7 @@ func (p *parser) parseArray(header parsedHeader, depth int) (any, error) {
 		if !strings.HasPrefix(line.content, "-") {
 			break
 		}
-		itemContent := strings.TrimSpace(line.content[1:])
+		itemContent := trimSpaces(line.content[1:])
 		p.pos++
 		if itemContent == "" {
 			values = append(values, map[string]any{})
@@ -327,14 +497,26 @@ func (p *parser) parseArray(header parsedHeader, depth int) (any, error) {
 		}
 
 		if strings.HasPrefix(itemContent, "[") {
+			if itemContent == "[]" {
+				values = append(values, []any{})
+				continue
+			}
 			itemHeader, ok, err := tryParseHeader(itemContent)
+			itemHeader.sourceLine = line.number
 			if err != nil {
 				return nil, errorWrap(line.number, err)
 			}
 			if !ok {
 				return nil, errorAt(line.number, "invalid array header in list item")
 			}
-			itemValue, err := p.parseArray(itemHeader, depth+1)
+			if len(itemHeader.fieldTree) > 0 && !itemHeader.keyPresent {
+				return nil, errorAt(line.number, "keyless fields-bearing header is not valid in a list item")
+			}
+			itemDepth := depth + 1
+			if itemHeader.keyPresent {
+				itemDepth = depth + 2
+			}
+			itemValue, err := p.parseArray(itemHeader, itemDepth)
 			if err != nil {
 				return nil, err
 			}
@@ -345,10 +527,15 @@ func (p *parser) parseArray(header parsedHeader, depth int) (any, error) {
 		if header, isHeader, err := tryParseHeader(itemContent); err != nil {
 			return nil, errorWrap(line.number, err)
 		} else if isHeader {
-			if header.key == "" {
+			if !header.keyPresent {
 				return nil, errorAt(line.number, "arrays within objects must have a key")
 			}
-			arrayValue, err := p.parseArray(header, depth+1)
+			var arrayValue any
+			if header.keyed {
+				arrayValue, err = p.parseKeyedObject(header, depth+2)
+			} else {
+				arrayValue, err = p.parseArray(header, depth+2)
+			}
 			if err != nil {
 				return nil, err
 			}
@@ -373,7 +560,7 @@ func (p *parser) parseArray(header parsedHeader, depth int) (any, error) {
 				values = append(values, map[string]any{key: obj})
 				continue
 			}
-			val, err := decodePrimitiveToken(rest)
+			val, err := p.decodePrimitiveToken(rest)
 			if err != nil {
 				return nil, errorWrap(line.number, err)
 			}
@@ -385,7 +572,7 @@ func (p *parser) parseArray(header parsedHeader, depth int) (any, error) {
 			continue
 		}
 
-		value, err := decodePrimitiveToken(itemContent)
+		value, err := p.decodePrimitiveToken(itemContent)
 		if err != nil {
 			return nil, errorWrap(line.number, err)
 		}
@@ -398,8 +585,137 @@ func (p *parser) parseArray(header parsedHeader, depth int) (any, error) {
 	return values, nil
 }
 
+func decodeTabularRow(fields []fieldNode, raw []string) (map[string]any, error) {
+	row := make(map[string]any)
+	index := 0
+	if err := decodeTabularFields(row, fields, raw, &index); err != nil {
+		return nil, err
+	}
+	return row, nil
+}
+
+func (p *parser) parseKeyedObject(header parsedHeader, depth int) (map[string]any, error) {
+	if err := p.checkDepth(depth); err != nil {
+		return nil, err
+	}
+	result := make(map[string]any)
+	seen := make(map[string]struct{})
+	for p.pos < len(p.lines) {
+		line := p.current()
+		if line.blank {
+			if p.cfg.strict {
+				if len(seen) == 0 {
+					p.pos++
+					continue
+				}
+				if nextIndent, ok := p.nextNonBlankIndent(p.pos); !ok || nextIndent <= depth {
+					break
+				}
+				return nil, errorAt(line.number, "blank line inside keyed array")
+			}
+			p.pos++
+			continue
+		}
+		if line.indent <= depth {
+			break
+		}
+		if line.indent != depth+1 {
+			if p.cfg.strict {
+				return nil, errorAt(line.number, "invalid indentation for keyed entry row")
+			}
+			p.pos++
+			continue
+		}
+		colon := indexOutsideQuotes(line.content, ':')
+		if colon < 0 {
+			if p.cfg.strict {
+				return nil, errorAt(line.number, "keyed entry row missing colon")
+			}
+			p.pos++
+			continue
+		}
+		key, err := decodeKeyToken(trimSpaces(line.content[:colon]))
+		if err != nil {
+			return nil, errorWrap(line.number, err)
+		}
+		rest := trimSpaces(line.content[colon+1:])
+		var raw []string
+		if rest != "" {
+			raw, err = parsepkg.SplitInlineValues(rest, header.delimiter.rune())
+			if err != nil {
+				return nil, errorWrap(line.number, err)
+			}
+		}
+		if p.cfg.strict && len(raw) != len(header.leafFields) {
+			return nil, errorAt(line.number, "keyed entry row width mismatch")
+		}
+		value, err := decodeTabularRow(header.fieldTree, raw)
+		if err != nil {
+			return nil, errorWrap(line.number, err)
+		}
+		p.pos++
+		if _, exists := seen[key]; exists && p.cfg.strict {
+			return nil, errorAtf(line.number, "duplicate object key %q", key)
+		}
+		seen[key] = struct{}{}
+		result[key] = value
+		if p.cfg.strict && len(seen) > header.length {
+			return nil, errorAtf(line.number, "too many keyed entries (expected %d)", header.length)
+		}
+	}
+	if p.cfg.strict && len(seen) != header.length {
+		line := header.sourceLine
+		if line == 0 && p.pos > 0 {
+			line = p.lines[p.pos-1].number
+		}
+		return nil, errorAtf(line, "keyed entry count mismatch; expected %d rows", header.length)
+	}
+	return result, nil
+}
+
+func decodeTabularFields(row map[string]any, fields []fieldNode, raw []string, index *int) error {
+	for _, field := range fields {
+		if len(field.children) > 0 {
+			nested := make(map[string]any)
+			before := *index
+			if err := decodeTabularFields(nested, field.children, raw, index); err != nil {
+				return err
+			}
+			if *index > before {
+				row[field.name] = nested
+			}
+			continue
+		}
+		if *index >= len(raw) {
+			continue
+		}
+		value, err := decodePrimitiveToken(raw[*index])
+		if err != nil {
+			return err
+		}
+		row[field.name] = value
+		*index++
+	}
+	return nil
+}
+
 func (p *parser) current() parsedLine {
 	return p.lines[p.pos]
+}
+
+func (p *parser) decodePrimitiveToken(token string) (any, error) {
+	value, err := decodePrimitiveToken(token)
+	if err != nil || !p.preserveNumbers || !jsonNumberLexeme.MatchString(token) || hasNumberLeadingZeros(token) {
+		return value, err
+	}
+	if number, ok := value.(float64); ok {
+		return decodedNumber{literal: token, value: number}, nil
+	}
+	if _, ok := value.(string); ok {
+		number, _ := strconv.ParseFloat(token, 64)
+		return decodedNumber{literal: token, value: number}, nil
+	}
+	return value, nil
 }
 
 func (p *parser) skipBlankLinesOutsideArrays() {
@@ -412,25 +728,35 @@ func (p *parser) skipBlankLinesOutsideArrays() {
 }
 
 func (p *parser) countRemainingNonBlank() int {
-	count := 0
-	for _, line := range p.lines[p.pos:] {
-		if !line.blank {
-			count++
-		}
-	}
-	return count
+	return p.remainingNonBlank[p.pos]
 }
 
 func (p *parser) nextNonBlankIndent(from int) (int, bool) {
-	for i := from + 1; i < len(p.lines); i++ {
-		if !p.lines[i].blank {
-			return p.lines[i].indent, true
-		}
+	from++
+	if from < len(p.lines) && p.remainingNonBlank[from] != p.remainingNonBlank[len(p.lines)] {
+		return p.nextNonBlank[from], true
 	}
 	return 0, false
 }
 
+func (p *parser) checkDepth(depth int) error {
+	if depth <= maxDecodeDepth {
+		return nil
+	}
+	line := 0
+	if p.pos < len(p.lines) {
+		line = p.lines[p.pos].number
+	} else if p.pos > 0 {
+		line = p.lines[p.pos-1].number
+	}
+	return errorAtf(line, "maximum nesting depth %d exceeded", maxDecodeDepth)
+}
+
 func (p *parser) collectObjectListSiblings(obj map[string]any, depth int) error {
+	seen := make(map[string]struct{}, len(obj))
+	for key := range obj {
+		seen[key] = struct{}{}
+	}
 	for p.pos < len(p.lines) {
 		next := p.current()
 		if next.blank {
@@ -449,18 +775,25 @@ func (p *parser) collectObjectListSiblings(obj map[string]any, depth int) error 
 		if next.indent != depth+2 {
 			return errorAt(next.number, "invalid indentation for object list sibling")
 		}
-		if header, isHeader, err := tryParseHeader(next.content); err != nil {
+		if header, isHeader, err := p.parseHeader(next); err != nil {
 			return errorWrap(next.number, err)
 		} else if isHeader {
 			p.pos++
-			value, err := p.parseArray(header, depth+1)
+			var value any
+			if header.keyed {
+				value, err = p.parseKeyedObject(header, depth+2)
+			} else {
+				value, err = p.parseArray(header, depth+1)
+			}
 			if err != nil {
 				return err
 			}
-			if header.key == "" {
+			if !header.keyPresent {
 				return errorAt(next.number, "arrays within objects must have a key")
 			}
-			obj[header.key] = value
+			if err := p.setObjectField(obj, seen, header.key, value, next.number); err != nil {
+				return err
+			}
 			continue
 		}
 		key, rest, err := splitKeyValue(next.content)
@@ -473,52 +806,95 @@ func (p *parser) collectObjectListSiblings(obj map[string]any, depth int) error 
 			if err != nil {
 				return err
 			}
-			obj[key] = nested
-		} else {
-			value, err := decodePrimitiveToken(rest)
-			if err != nil {
-				return errorWrap(next.number, err)
+			if err := p.setObjectField(obj, seen, key, nested, next.number); err != nil {
+				return err
 			}
-			obj[key] = value
+		} else {
+			var value any
+			if rest == "[]" {
+				value = []any{}
+			} else {
+				value, err = p.decodePrimitiveToken(rest)
+				if err != nil {
+					return errorWrap(next.number, err)
+				}
+			}
+			if err := p.setObjectField(obj, seen, key, value, next.number); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
 }
 
+func (p *parser) parseHeader(line parsedLine) (parsedHeader, bool, error) {
+	header, ok, err := tryParseHeader(line.content)
+	if err != nil && !p.cfg.strict {
+		return parsedHeader{}, false, nil
+	}
+	if ok && p.cfg.strict {
+		if err := validateFieldTree(header.fieldTree); err != nil {
+			return parsedHeader{}, false, errorWrap(line.number, err)
+		}
+	}
+	if ok {
+		header.sourceLine = line.number
+	}
+	return header, ok, err
+}
+
 type parsedHeader struct {
 	key          string
+	keyPresent   bool
+	keyed        bool
 	length       int
 	delimiter    Delimiter
-	fields       []string
+	fieldTree    []fieldNode
+	leafFields   []string
 	inlineValues string
+	sourceLine   int
 }
 
 func tryParseHeader(content string) (parsedHeader, bool, error) {
-	colon := indexOutsideQuotes(content, ':')
-	if colon == -1 {
-		return parsedHeader{}, false, nil
-	}
-	left := strings.TrimSpace(content[:colon])
-	right := strings.TrimSpace(content[colon+1:])
-	if left == "" {
-		return parsedHeader{}, false, nil
-	}
-	bracketStart := indexOutsideQuotes(left, '[')
+	colonBeforeBracket := indexOutsideQuotes(content, ':')
+	bracketStart := indexOutsideQuotes(content, '[')
 	if bracketStart == -1 {
 		return parsedHeader{}, false, nil
 	}
-	rest := left[bracketStart+1:]
-	bracketOffset := indexOutsideQuotes(rest, ']')
-	if bracketOffset == -1 {
+	if len(content) > maxHeaderBytes {
+		return parsedHeader{}, false, fmt.Errorf("array header exceeds maximum size of %d bytes", maxHeaderBytes)
+	}
+	if colonBeforeBracket >= 0 && colonBeforeBracket < bracketStart {
+		return parsedHeader{}, false, nil
+	}
+	bracketEnd := matchingBracket(content, bracketStart)
+	if bracketEnd == -1 {
 		return parsedHeader{}, false, errors.New("missing closing bracket in array header")
 	}
-	keyPart := strings.TrimSpace(left[:bracketStart])
-	bracketSegment := rest[:bracketOffset]
-	fieldSegment := strings.TrimSpace(rest[bracketOffset+1:])
+	colon := indexOutsideQuotesFrom(content, ':', bracketEnd+1)
+	if colon == -1 {
+		if trimSpaces(content) == "[]" {
+			return parsedHeader{}, false, nil
+		}
+		return parsedHeader{}, false, errors.New("missing colon after array header")
+	}
+	right := trimSpaces(content[colon+1:])
+	rawKeyPart := content[:bracketStart]
+	keyPart := trimSpaces(rawKeyPart)
+	if keyPart != "" && len(rawKeyPart) > 0 && (rawKeyPart[len(rawKeyPart)-1] == ' ' || rawKeyPart[len(rawKeyPart)-1] == '\t') {
+		return parsedHeader{}, false, errors.New("whitespace between key and array bracket")
+	}
+	bracketSegment := content[bracketStart+1 : bracketEnd]
+	rawFieldSegment := content[bracketEnd+1 : colon]
+	if rawFieldSegment != "" && rawFieldSegment[0] != '{' {
+		return parsedHeader{}, false, errors.New("content between array bracket and colon")
+	}
+	fieldSegment := rawFieldSegment
 
 	header := parsedHeader{
-		key:       "",
-		delimiter: DelimiterComma,
+		key:        "",
+		delimiter:  DelimiterComma,
+		keyPresent: keyPart != "",
 	}
 
 	if keyPart != "" {
@@ -529,74 +905,249 @@ func tryParseHeader(content string) (parsedHeader, bool, error) {
 		header.key = key
 	}
 
-	length, delim, err := parseBracketSegment(bracketSegment)
+	length, delim, keyed, err := parseBracketSegment(bracketSegment)
 	if err != nil {
 		return parsedHeader{}, false, err
 	}
 	header.length = length
 	header.delimiter = delim
+	header.keyed = keyed
 
 	if fieldSegment != "" {
 		if !strings.HasPrefix(fieldSegment, "{") || !strings.HasSuffix(fieldSegment, "}") {
 			return parsedHeader{}, false, errors.New("invalid field segment in array header")
 		}
 		inner := fieldSegment[1 : len(fieldSegment)-1]
-		if inner != "" {
-			rawFields, err := parsepkg.SplitInlineValues(inner, delim.rune())
-			if err != nil {
-				return parsedHeader{}, false, err
-			}
-			fields := make([]string, 0, len(rawFields))
-			for _, token := range rawFields {
-				field, err := decodeKeyToken(token)
-				if err != nil {
-					return parsedHeader{}, false, err
-				}
-				fields = append(fields, field)
-			}
-			header.fields = fields
+		fields, err := parseFieldNodes(inner, delim.rune())
+		if err != nil {
+			return parsedHeader{}, false, err
 		}
+		header.fieldTree = fields
+		header.leafFields = flattenFields(fields)
+	}
+	if len(header.fieldTree) > 0 && right != "" {
+		return parsedHeader{}, false, errors.New("content after fields-bearing header")
+	}
+	if header.keyed && len(header.fieldTree) == 0 {
+		return parsedHeader{}, false, errors.New("keyed header requires a field list")
 	}
 
 	header.inlineValues = right
 	return header, true, nil
 }
 
-func parseBracketSegment(segment string) (int, Delimiter, error) {
-	useMarker := false
-	if strings.HasPrefix(segment, "#") {
-		useMarker = true
-		segment = segment[1:]
+func matchingBracket(s string, start int) int {
+	inQuotes, escaped := false, false
+	for i := start + 1; i < len(s); i++ {
+		c := s[i]
+		if escaped {
+			escaped = false
+			continue
+		}
+		if c == '\\' && inQuotes {
+			escaped = true
+			continue
+		}
+		if c == '"' {
+			inQuotes = !inQuotes
+			continue
+		}
+		if !inQuotes && c == ']' {
+			return i
+		}
 	}
-	if segment == "" {
-		return 0, DelimiterComma, errors.New("missing array length")
+	return -1
+}
+
+func indexOutsideQuotesFrom(s string, target rune, start int) int {
+	if start < 0 {
+		start = 0
 	}
-	var digits strings.Builder
-	var delim = DelimiterComma
-	for _, r := range segment {
-		if unicode.IsDigit(r) {
-			digits.WriteRune(r)
+	part := s[start:]
+	i := indexOutsideQuotes(part, target)
+	if i == -1 {
+		return -1
+	}
+	return start + i
+}
+
+func parseFieldNodes(segment string, delimiter rune) ([]fieldNode, error) {
+	return parseFieldNodesAtDepth(segment, delimiter, 0)
+}
+
+func parseFieldNodesAtDepth(segment string, delimiter rune, depth int) ([]fieldNode, error) {
+	if depth > maxDecodeDepth {
+		return nil, fmt.Errorf("maximum nesting depth %d exceeded", maxDecodeDepth)
+	}
+	parts, err := splitFieldEntries(segment, delimiter)
+	if err != nil {
+		return nil, err
+	}
+	fields := make([]fieldNode, 0, len(parts))
+	for _, part := range parts {
+		part = trimSpaces(part)
+		if part == "" {
+			return nil, errors.New("empty field name")
+		}
+		open := indexOutsideQuotes(part, '{')
+		if open == -1 {
+			name, err := decodeKeyToken(part)
+			if err != nil {
+				return nil, err
+			}
+			fields = append(fields, fieldNode{name: name})
+			continue
+		}
+		if !strings.HasSuffix(trimSpaces(part), "}") {
+			return nil, errors.New("invalid nested field group")
+		}
+		close := matchingBrace(part, open)
+		if close != len(strings.TrimSpace(part))-1 {
+			return nil, errors.New("invalid nested field group")
+		}
+		name, err := decodeKeyToken(trimSpaces(part[:open]))
+		if err != nil {
+			return nil, err
+		}
+		children, err := parseFieldNodesAtDepth(part[open+1:close], delimiter, depth+1)
+		if err != nil {
+			return nil, err
+		}
+		if len(children) == 0 {
+			return nil, errors.New("empty nested field group")
+		}
+		fields = append(fields, fieldNode{name: name, children: children})
+	}
+	return fields, nil
+}
+
+func splitFieldEntries(s string, delimiter rune) ([]string, error) {
+	var parts []string
+	start, depth := 0, 0
+	inQuotes, escaped := false, false
+	for i, r := range s {
+		if escaped {
+			escaped = false
+			continue
+		}
+		if r == '\\' && inQuotes {
+			escaped = true
+			continue
+		}
+		if r == '"' {
+			inQuotes = !inQuotes
+			continue
+		}
+		if inQuotes {
 			continue
 		}
 		switch r {
-		case '\t':
-			delim = DelimiterTab
-		case '|':
-			delim = DelimiterPipe
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth < 0 {
+				return nil, errors.New("unbalanced field group")
+			}
 		default:
-			return 0, DelimiterComma, fmt.Errorf("invalid delimiter symbol %q", r)
+			if depth >= 0 {
+				switch r {
+				case ',', '|', '\t':
+					if r != delimiter {
+						return nil, fmt.Errorf("field-list delimiter does not match header delimiter")
+					}
+					if depth == 0 {
+						parts = append(parts, s[start:i])
+						start = i + 1
+					}
+				}
+			}
 		}
 	}
-	lengthStr := digits.String()
-	if lengthStr == "" {
-		return 0, DelimiterComma, errors.New("missing digits in array length")
+	if inQuotes || depth != 0 {
+		return nil, errors.New("unbalanced field group")
 	}
-	length, err := strconv.Atoi(lengthStr)
+	return append(parts, s[start:]), nil
+}
+
+func matchingBrace(s string, start int) int {
+	depth := 0
+	inQuotes, escaped := false, false
+	for i := start; i < len(s); i++ {
+		c := s[i]
+		if escaped {
+			escaped = false
+			continue
+		}
+		if c == '\\' && inQuotes {
+			escaped = true
+			continue
+		}
+		if c == '"' {
+			inQuotes = !inQuotes
+			continue
+		}
+		if inQuotes {
+			continue
+		}
+		if c == '{' {
+			depth++
+		}
+		if c == '}' {
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+func parseBracketSegment(segment string) (int, Delimiter, bool, error) {
+	keyed := false
+	if colon := strings.IndexByte(segment, ':'); colon >= 0 {
+		keyed = true
+		if strings.Contains(segment[colon+1:], ":") {
+			return 0, DelimiterComma, keyed, errors.New("multiple keyed markers")
+		}
+		tail := segment[colon+1:]
+		if strings.ContainsAny(tail, ",:") || len(tail) > 1 || (len(tail) == 1 && tail[0] != '|' && tail[0] != '\t') {
+			return 0, DelimiterComma, keyed, errors.New("invalid keyed marker")
+		}
+		if strings.ContainsAny(segment[:colon], ",|\t") {
+			return 0, DelimiterComma, keyed, errors.New("misplaced keyed marker")
+		}
+		segment = segment[:colon] + tail
+	}
+	if segment == "" {
+		return 0, DelimiterComma, keyed, errors.New("missing array length")
+	}
+	lengthText := segment
+	delim := DelimiterComma
+	if last := segment[len(segment)-1]; last == '\t' || last == '|' {
+		lengthText = segment[:len(segment)-1]
+		if last == '\t' {
+			delim = DelimiterTab
+		} else {
+			delim = DelimiterPipe
+		}
+	}
+	if lengthText == "" {
+		return 0, DelimiterComma, keyed, errors.New("missing digits in array length")
+	}
+	if len(lengthText) > 1 && lengthText[0] == '0' {
+		return 0, DelimiterComma, keyed, errors.New("array length has leading zeros")
+	}
+	for i := 0; i < len(lengthText); i++ {
+		if lengthText[i] < '0' || lengthText[i] > '9' {
+			return 0, DelimiterComma, keyed, fmt.Errorf("invalid array length %q", lengthText)
+		}
+	}
+	parsed, err := strconv.ParseUint(lengthText, 10, strconv.IntSize)
 	if err != nil {
-		return 0, DelimiterComma, err
+		return 0, DelimiterComma, keyed, err
 	}
-	_ = useMarker // marker is ignored semantically.
-	return length, delim, nil
+	return int(parsed), delim, keyed, nil
 }
 
 func splitKeyValue(content string) (string, string, error) {
@@ -604,8 +1155,8 @@ func splitKeyValue(content string) (string, string, error) {
 	if colon == -1 {
 		return "", "", errors.New("missing colon after key")
 	}
-	keyToken := strings.TrimSpace(content[:colon])
-	valueToken := strings.TrimSpace(content[colon+1:])
+	keyToken := trimSpaces(content[:colon])
+	valueToken := trimSpaces(content[colon+1:])
 	key, err := decodeKeyToken(keyToken)
 	if err != nil {
 		return "", "", err
@@ -613,17 +1164,57 @@ func splitKeyValue(content string) (string, string, error) {
 	return key, valueToken, nil
 }
 
+func trimSpaces(s string) string {
+	return strings.Trim(s, " ")
+}
+
 func decodeKeyToken(token string) (string, error) {
 	if token == "" {
 		return "", errors.New("empty key")
 	}
 	if token[0] == '"' {
+		if closingQuote(token) != len(token)-1 {
+			return "", errors.New("content after quoted key")
+		}
 		return parsepkg.UnquoteString(token)
 	}
-	if !formatpkg.IsValidUnquotedKey(token) {
-		return "", fmt.Errorf("invalid unquoted key %q", token)
-	}
+	// Decoder keys are literal tokens. The encoder's stricter unquoted-key
+	// pattern does not constrain accepted input.
 	return token, nil
+}
+
+func closingQuote(token string) int {
+	escaped := false
+	for i := 1; i < len(token); i++ {
+		if escaped {
+			escaped = false
+			continue
+		}
+		if token[i] == '\\' {
+			escaped = true
+			continue
+		}
+		if token[i] == '"' {
+			return i
+		}
+	}
+	return -1
+}
+
+func validateFieldTree(fields []fieldNode) error {
+	seen := make(map[string]struct{}, len(fields))
+	for _, field := range fields {
+		if _, exists := seen[field.name]; exists {
+			return fmt.Errorf("duplicate field name %q", field.name)
+		}
+		seen[field.name] = struct{}{}
+	}
+	for _, field := range fields {
+		if err := validateFieldTree(field.children); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func decodePrimitiveToken(token string) (any, error) {
@@ -631,6 +1222,9 @@ func decodePrimitiveToken(token string) (any, error) {
 		return "", nil
 	}
 	if token[0] == '"' {
+		if closingQuote(token) != len(token)-1 {
+			return nil, errors.New("content after quoted string")
+		}
 		return parsepkg.UnquoteString(token)
 	}
 	switch token {
@@ -641,17 +1235,7 @@ func decodePrimitiveToken(token string) (any, error) {
 	case "null":
 		return nil, nil
 	}
-	if hasForbiddenLeadingZeros(token) {
-		return token, nil
-	}
-	if formatpkg.LooksNumeric(token) {
-		num, err := strconv.ParseFloat(token, 64)
-		if err != nil {
-			return nil, err
-		}
-		if num == 0 {
-			num = 0
-		}
+	if num, ok := formatpkg.ParseNumber(token); ok {
 		return num, nil
 	}
 	return token, nil

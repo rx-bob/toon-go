@@ -6,9 +6,13 @@ import (
 	"math"
 	"math/big"
 	"reflect"
+	"regexp"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
+
+	formatpkg "github.com/toon-format/toon-go/internal/format"
 )
 
 // normalize applies the data-model rules from Section 2 and Section 3 to a Go
@@ -122,6 +126,9 @@ func normalize(v any, cfg encoderOptions) (normalizedValue, error) {
 
 func normalizeStructValue(val reflect.Value, cfg encoderOptions) (Object, error) {
 	meta := cachedStructMeta(val.Type())
+	if meta.err != nil {
+		return Object{}, meta.err
+	}
 	fields := make([]Field, 0, len(meta.fields))
 	for _, field := range meta.fields {
 		childValue := fieldValueByIndex(val, field.index)
@@ -142,7 +149,12 @@ func normalizeStructValue(val reflect.Value, cfg encoderOptions) (Object, error)
 
 func normalizeObjectFields(fields []Field, cfg encoderOptions) (Object, error) {
 	normalized := make([]Field, 0, len(fields))
+	seen := make(map[string]struct{}, len(fields))
 	for _, field := range fields {
+		if _, exists := seen[field.Key]; exists {
+			return Object{}, fmt.Errorf("duplicate object key %q", field.Key)
+		}
+		seen[field.Key] = struct{}{}
 		child, err := normalize(field.Value, cfg)
 		if err != nil {
 			return Object{}, fmt.Errorf("toon: %s: %w", field.Key, err)
@@ -165,22 +177,72 @@ func normalizeFloat(f float64) (normalizedValue, error) {
 		if f == math.Copysign(0, -1) {
 			f = 0
 		}
-		s := strconv.FormatFloat(f, 'f', -1, 64)
-		return numberValue{literal: s}, nil
+		return numberValue{literal: formatpkg.FormatNumber(f)}, nil
 	}
 }
 
 func normalizeNumberString(s string) (normalizedValue, error) {
-	f, err := strconv.ParseFloat(s, 64)
-	if err != nil {
-		// Preserve as string literal; encoder will handle quoting.
+	if !jsonNumberLexeme.MatchString(s) || hasNumberLeadingZeros(s) {
 		return s, nil
 	}
+	f, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		// Valid numbers outside float64's range stay numeric and retain their
+		// original lexeme instead of silently becoming strings or infinities.
+		return numberValue{literal: s}, nil
+	}
 	if math.IsInf(f, 0) || math.IsNaN(f) {
-		return nil, nil
+		return numberValue{literal: s}, nil
 	}
-	if f == 0 {
-		f = 0
+	rational, ok := exactNumberRat(s)
+	if !ok {
+		return numberValue{literal: s}, nil
 	}
-	return numberValue{literal: strconv.FormatFloat(f, 'f', -1, 64)}, nil
+	floatRat := new(big.Rat).SetFloat64(f)
+	if rational.Cmp(floatRat) != 0 {
+		return numberValue{literal: s}, nil
+	}
+	return numberValue{literal: formatpkg.FormatNumber(f)}, nil
+}
+
+var jsonNumberLexeme = regexp.MustCompile(`^-?[0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?$`)
+
+func hasNumberLeadingZeros(s string) bool {
+	s = strings.TrimPrefix(s, "-")
+	return len(s) > 1 && s[0] == '0' && s[1] >= '0' && s[1] <= '9'
+}
+
+func exactNumberRat(s string) (*big.Rat, bool) {
+	negative := strings.HasPrefix(s, "-")
+	if negative {
+		s = s[1:]
+	}
+	exponent := 0
+	if marker := strings.IndexAny(s, "eE"); marker >= 0 {
+		parsed, err := strconv.ParseInt(s[marker+1:], 10, 32)
+		if err != nil || parsed > 10_000 || parsed < -10_000 {
+			return nil, false
+		}
+		exponent = int(parsed)
+		s = s[:marker]
+	}
+	fractionDigits := 0
+	if point := strings.IndexByte(s, '.'); point >= 0 {
+		fractionDigits = len(s) - point - 1
+		s = s[:point] + s[point+1:]
+	}
+	numerator := new(big.Int)
+	if _, ok := numerator.SetString(s, 10); !ok {
+		return nil, false
+	}
+	if negative {
+		numerator.Neg(numerator)
+	}
+	scale := fractionDigits - exponent
+	if scale <= 0 {
+		numerator.Mul(numerator, new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(-scale)), nil))
+		return new(big.Rat).SetInt(numerator), true
+	}
+	denominator := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(scale)), nil)
+	return new(big.Rat).SetFrac(numerator, denominator), true
 }
