@@ -127,6 +127,15 @@ sets the delimiter for all emitted array scopes. `WithDocumentDelimiter`,
 `WithArrayDelimiter`, and `WithLengthMarkers` remain available only as
 deprecated compatibility aliases; length markers are ignored in v4.1.
 
+### Decoder safeguards
+
+The decoder rejects recursive input deeper than 64 structural levels and array
+headers longer than 64 KiB. These conservative implementation safeguards
+prevent stack exhaustion and excessive header work; they do not change the
+TOON format's logical nesting or document-size model. Declared array counts
+are validated but are never used to preallocate result storage, so a huge
+declared count with little input remains bounded by the input actually read.
+
 ## Resources
 
 - [TOON Specification](https://github.com/toon-format/spec/blob/main/SPEC.md)

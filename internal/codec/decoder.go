@@ -85,11 +85,20 @@ func DecodeString(s string, opts ...DecoderOption) (any, error) {
 }
 
 type parser struct {
-	lines           []parsedLine
-	pos             int
-	cfg             decoderOptions
-	preserveNumbers bool
+	lines             []parsedLine
+	pos               int
+	cfg               decoderOptions
+	preserveNumbers   bool
+	remainingNonBlank []int
+	nextNonBlank      []int
 }
+
+// These limits protect recursive parsing and header bookkeeping from hostile
+// input. They are implementation safeguards, not a format-level restriction.
+const (
+	maxDecodeDepth = 64
+	maxHeaderBytes = 64 * 1024
+)
 
 type parsedLine struct {
 	number  int
@@ -118,9 +127,22 @@ func newParser(input string, cfg decoderOptions) (*parser, error) {
 			blank:   content == "",
 		})
 	}
+	remainingNonBlank := make([]int, len(lines)+1)
+	nextNonBlank := make([]int, len(lines)+1)
+	for i := len(lines) - 1; i >= 0; i-- {
+		remainingNonBlank[i] = remainingNonBlank[i+1]
+		if !lines[i].blank {
+			remainingNonBlank[i]++
+			nextNonBlank[i] = lines[i].indent
+		} else {
+			nextNonBlank[i] = nextNonBlank[i+1]
+		}
+	}
 	return &parser{
-		lines: lines,
-		cfg:   cfg,
+		lines:             lines,
+		cfg:               cfg,
+		remainingNonBlank: remainingNonBlank,
+		nextNonBlank:      nextNonBlank,
 	}, nil
 }
 
@@ -265,6 +287,9 @@ func (p *parser) finishRoot(value any) (any, error) {
 }
 
 func (p *parser) parseObject(depth int) (map[string]any, error) {
+	if err := p.checkDepth(depth); err != nil {
+		return nil, err
+	}
 	result := make(map[string]any)
 	seen := make(map[string]struct{})
 	for p.pos < len(p.lines) {
@@ -345,6 +370,9 @@ func (p *parser) setObjectField(obj map[string]any, seen map[string]struct{}, ke
 }
 
 func (p *parser) parseArray(header parsedHeader, depth int) (any, error) {
+	if err := p.checkDepth(depth); err != nil {
+		return nil, err
+	}
 	delimiter := header.delimiter.rune()
 	var values []any
 	ctx := p.cfg
@@ -552,6 +580,9 @@ func decodeTabularRow(fields []fieldNode, raw []string) (map[string]any, error) 
 }
 
 func (p *parser) parseKeyedObject(header parsedHeader, depth int) (map[string]any, error) {
+	if err := p.checkDepth(depth); err != nil {
+		return nil, err
+	}
 	result := make(map[string]any)
 	seen := make(map[string]struct{})
 	for p.pos < len(p.lines) {
@@ -682,22 +713,28 @@ func (p *parser) skipBlankLinesOutsideArrays() {
 }
 
 func (p *parser) countRemainingNonBlank() int {
-	count := 0
-	for _, line := range p.lines[p.pos:] {
-		if !line.blank {
-			count++
-		}
-	}
-	return count
+	return p.remainingNonBlank[p.pos]
 }
 
 func (p *parser) nextNonBlankIndent(from int) (int, bool) {
-	for i := from + 1; i < len(p.lines); i++ {
-		if !p.lines[i].blank {
-			return p.lines[i].indent, true
-		}
+	from++
+	if from < len(p.lines) && p.remainingNonBlank[from] != p.remainingNonBlank[len(p.lines)] {
+		return p.nextNonBlank[from], true
 	}
 	return 0, false
+}
+
+func (p *parser) checkDepth(depth int) error {
+	if depth <= maxDecodeDepth {
+		return nil
+	}
+	line := 0
+	if p.pos < len(p.lines) {
+		line = p.lines[p.pos].number
+	} else if p.pos > 0 {
+		line = p.lines[p.pos-1].number
+	}
+	return errorAtf(line, "maximum nesting depth %d exceeded", maxDecodeDepth)
 }
 
 func (p *parser) collectObjectListSiblings(obj map[string]any, depth int) error {
@@ -809,6 +846,9 @@ func tryParseHeader(content string) (parsedHeader, bool, error) {
 	if bracketStart == -1 {
 		return parsedHeader{}, false, nil
 	}
+	if len(content) > maxHeaderBytes {
+		return parsedHeader{}, false, fmt.Errorf("array header exceeds maximum size of %d bytes", maxHeaderBytes)
+	}
 	if colonBeforeBracket >= 0 && colonBeforeBracket < bracketStart {
 		return parsedHeader{}, false, nil
 	}
@@ -917,6 +957,13 @@ func indexOutsideQuotesFrom(s string, target rune, start int) int {
 }
 
 func parseFieldNodes(segment string, delimiter rune) ([]fieldNode, error) {
+	return parseFieldNodesAtDepth(segment, delimiter, 0)
+}
+
+func parseFieldNodesAtDepth(segment string, delimiter rune, depth int) ([]fieldNode, error) {
+	if depth > maxDecodeDepth {
+		return nil, fmt.Errorf("maximum nesting depth %d exceeded", maxDecodeDepth)
+	}
 	parts, err := splitFieldEntries(segment, delimiter)
 	if err != nil {
 		return nil, err
@@ -947,7 +994,7 @@ func parseFieldNodes(segment string, delimiter rune) ([]fieldNode, error) {
 		if err != nil {
 			return nil, err
 		}
-		children, err := parseFieldNodes(part[open+1:close], delimiter)
+		children, err := parseFieldNodesAtDepth(part[open+1:close], delimiter, depth+1)
 		if err != nil {
 			return nil, err
 		}
