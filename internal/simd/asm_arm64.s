@@ -414,4 +414,94 @@ special_done:
 	MOVD    R9, processed+40(FP)
 	RET
 
+// func lineMaskNEONAsm(data []byte) (mask uint32, processed int)
+TEXT ·lineMaskNEONAsm(SB), NOSPLIT, $0-40
+	MOVD    data_base+0(FP), R0
+	MOVD    data_len+8(FP), R1
+	CMP     $16, R1
+	BLO     line_mask_done
 
+	MOVD    $0x0a, R2
+	VMOV    R2, V0.B16
+	MOVD    $0x0d, R3
+	VMOV    R3, V1.B16
+	VLD1    (R0), [V2.B16]
+	VCMEQ   V0.B16, V2.B16, V3.B16
+	VCMEQ   V1.B16, V2.B16, V4.B16
+	VORR    V4.B16, V3.B16, V3.B16
+
+	MOVD    $0x0101010101010101, R8
+	MOVD    $0x0102040810204080, R9
+	VMOV    V3.D[0], R6
+	LSR     $7, R6, R7
+	AND     R8, R7, R7
+	MUL     R9, R7, R7
+	LSR     $56, R7, R6
+	VMOV    V3.D[1], R7
+	LSR     $7, R7, R10
+	AND     R8, R10, R10
+	MUL     R9, R10, R10
+	LSR     $56, R10, R10
+	ORR     R10<<8, R6, R6
+	MOVW    R6, mask+24(FP)
+	MOVD    $16, R6
+	MOVD    R6, processed+32(FP)
+	RET
+
+line_mask_done:
+	MOVD    $0, R6
+	MOVW    R6, mask+24(FP)
+	MOVD    R6, processed+32(FP)
+	RET
+
+// func leadingSpacesNEONAsm(data []byte) (count int, processed int)
+TEXT ·leadingSpacesNEONAsm(SB), NOSPLIT, $0-40
+	MOVD    data_base+0(FP), R0
+	MOVD    data_len+8(FP), R1
+	MOVD    $0, R9
+	CMP     $16, R1
+	BLO     spaces_neon_done
+
+	MOVD    $0x20, R2
+	VMOV    R2, V0.B16
+	MOVD    $0x0101010101010101, R8
+	MOVD    $0x0102040810204080, R10
+	SUB     $16, R1, R11
+
+spaces_neon_loop:
+	CMP     R11, R9
+	BHI     spaces_neon_done
+	ADD     R0, R9, R12
+	VLD1    (R12), [V1.B16]
+	VCMEQ   V0.B16, V1.B16, V2.B16
+
+	VMOV    V2.D[0], R6
+	LSR     $7, R6, R7
+	AND     R8, R7, R7
+	MUL     R10, R7, R7
+	LSR     $56, R7, R6
+	VMOV    V2.D[1], R7
+	LSR     $7, R7, R12
+	AND     R8, R12, R12
+	MUL     R10, R12, R12
+	LSR     $56, R12, R12
+	ORR     R12<<8, R6, R6
+	MVN     R6, R6
+	AND     $0xffff, R6, R6
+	CBNZ    R6, spaces_neon_found
+	ADD     $16, R9, R9
+	B       spaces_neon_loop
+
+spaces_neon_found:
+	RBIT    R6, R7
+	CLZ     R7, R7
+	ADD     R9, R7, R7
+	MOVD    R7, count+24(FP)
+	ADD     $16, R9, R9
+	MOVD    R9, processed+32(FP)
+	RET
+
+spaces_neon_done:
+	MOVD    R9, count+24(FP)
+	MOVD    R9, processed+32(FP)
+	RET

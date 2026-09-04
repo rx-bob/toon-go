@@ -1241,6 +1241,9 @@ func TestAVX2LineAndIndentDifferential(t *testing.T) {
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("ScanLinesAVX2(%q) = %v, want %v", input, got, want)
 		}
+		if got := ScanLinesNEON([]byte(input), nil); !reflect.DeepEqual(got, want) {
+			t.Errorf("ScanLinesNEON(%q) = %v, want %v", input, got, want)
+		}
 	}
 
 	for _, n := range []int{0, 1, 7, 31, 32, 33, 63, 64, 65, 96} {
@@ -1251,6 +1254,12 @@ func TestAVX2LineAndIndentDifferential(t *testing.T) {
 		}
 		if got := ComputeIndentAVX2([]byte(input)); got != want {
 			t.Errorf("ComputeIndentAVX2(%d spaces) = %d, want %d", n, got, want)
+		}
+		if got := LeadingSpacesNEON([]byte(input)); got != want {
+			t.Errorf("LeadingSpacesNEON(%d spaces) = %d, want %d", n, got, want)
+		}
+		if got := ComputeIndentNEON([]byte(input)); got != want {
+			t.Errorf("ComputeIndentNEON(%d spaces) = %d, want %d", n, got, want)
 		}
 	}
 
@@ -1273,9 +1282,15 @@ func TestAVX2LineAndIndentDifferential(t *testing.T) {
 		if gotLines := ScanLinesAVX2(data, nil); !reflect.DeepEqual(gotLines, wantLines) {
 			t.Fatalf("iteration %d: ScanLinesAVX2(%q) = %v, want %v", iter, data, gotLines, wantLines)
 		}
+		if gotLines := ScanLinesNEON(data, nil); !reflect.DeepEqual(gotLines, wantLines) {
+			t.Fatalf("iteration %d: ScanLinesNEON(%q) = %v, want %v", iter, data, gotLines, wantLines)
+		}
 		wantIndent := LeadingSpacesSWAR(data)
 		if gotIndent := LeadingSpacesAVX2(data); gotIndent != wantIndent {
 			t.Fatalf("iteration %d: LeadingSpacesAVX2(%q) = %d, want %d", iter, data, gotIndent, wantIndent)
+		}
+		if gotIndent := LeadingSpacesNEON(data); gotIndent != wantIndent {
+			t.Fatalf("iteration %d: LeadingSpacesNEON(%q) = %d, want %d", iter, data, gotIndent, wantIndent)
 		}
 	}
 }
