@@ -193,3 +193,56 @@ func TestRoundTripObjectListArrayFirstField(t *testing.T) {
 		t.Fatalf("unexpected decoded buckets: %#v", decoded.Buckets)
 	}
 }
+
+func TestDecodeTabular_DiverseDelimiters(t *testing.T) {
+	cases := []struct {
+		name string
+		doc  string
+	}{
+		{
+			name: "Comma",
+			doc: strings.Join([]string{
+				"items[3]{id,sku,name,price}:",
+				"  1,A100,\"Widget, Pro\",19.99",
+				"  2,B200,Gadget,29.5",
+				"  3,C300,\"Thing \\\"Special\\\"\",39.0",
+			}, "\n"),
+		},
+		{
+			name: "Pipe",
+			doc: strings.Join([]string{
+				"items[3|]{id|sku|name|price}:",
+				"  1|A100|\"Widget| Pro\"|19.99",
+				"  2|B200|Gadget|29.5",
+				"  3|C300|\"Thing \\\"Special\\\"\"|39.0",
+			}, "\n"),
+		},
+		{
+			name: "Tab",
+			doc: strings.Join([]string{
+				"items[3\t]{id\tsku\tname\tprice}:",
+				"  1\tA100\t\"Widget\t Pro\"\t19.99",
+				"  2\tB200\tGadget\t29.5",
+				"  3\tC300\t\"Thing \\\"Special\\\"\"\t39.0",
+			}, "\n"),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := decodeMap(t, tc.doc)
+			items, ok := root["items"].([]any)
+			if !ok || len(items) != 3 {
+				t.Fatalf("expected 3 items, got %#v", root["items"])
+			}
+			first := items[0].(map[string]any)
+			if first["id"] != float64(1) || first["sku"] != "A100" || first["price"] != 19.99 {
+				t.Errorf("item 0 mismatch: %#v", first)
+			}
+			third := items[2].(map[string]any)
+			if third["name"] != `Thing "Special"` {
+				t.Errorf("item 2 name mismatch: got %q, want %q", third["name"], `Thing "Special"`)
+			}
+		})
+	}
+}

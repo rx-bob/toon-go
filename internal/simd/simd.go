@@ -106,7 +106,7 @@ func ScanDelimScalar(data []byte, delim byte) int {
 func hasByte64(w uint64, b byte) uint64 {
 	mask := uint64(b) * 0x0101010101010101
 	v := w ^ mask
-	return (v - 0x0101010101010101) & ^v & 0x8080808080808080
+	return ^(((v & 0x7f7f7f7f7f7f7f7f) + 0x7f7f7f7f7f7f7f7f) | v) & 0x8080808080808080
 }
 
 // ScanDelimSWAR counts unquoted occurrences of delim using 64-bit SWAR word scanning.

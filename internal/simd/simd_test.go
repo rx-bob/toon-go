@@ -6,8 +6,6 @@ import (
 	"math/rand"
 	"strings"
 	"testing"
-
-	parsepkg "github.com/toon-format/toon-go/internal/parse"
 )
 
 func TestCPUFeatures_Queries(t *testing.T) {
@@ -396,19 +394,63 @@ func TestSWAR_ParityWithParse(t *testing.T) {
 		{`a,b\c,d`, ','},
 	}
 
+	indexUnquotedScalar := func(s string, target byte) int {
+		inQuotes := false
+		for i := 0; i < len(s); i++ {
+			switch s[i] {
+			case '\\':
+				if inQuotes {
+					i++
+				}
+			case '"':
+				inQuotes = !inQuotes
+			default:
+				if !inQuotes && s[i] == target {
+					return i
+				}
+			}
+		}
+		return -1
+	}
+
+	splitDelimsScalar := func(s string, delim byte) ([]string, error) {
+		var tokens []string
+		inQuotes := false
+		escaped := false
+		start := 0
+		for i := 0; i < len(s); i++ {
+			b := s[i]
+			switch {
+			case escaped:
+				escaped = false
+			case b == '\\' && inQuotes:
+				escaped = true
+			case b == '"':
+				inQuotes = !inQuotes
+			case b == delim && !inQuotes:
+				tokens = append(tokens, strings.Trim(s[start:i], " "))
+				start = i + 1
+			}
+		}
+		if inQuotes {
+			return nil, fmt.Errorf("unterminated string")
+		}
+		tokens = append(tokens, strings.Trim(s[start:], " "))
+		return tokens, nil
+	}
+
 	for i, sample := range testSamples {
 		b := []byte(sample.input)
-		delimRune := rune(sample.delim)
 
 		// 1. Check IndexUnquoted parity
-		expectedFirst := parsepkg.IndexUnquoted(sample.input, delimRune)
+		expectedFirst := indexUnquotedScalar(sample.input, sample.delim)
 		gotFirst := IndexUnquotedSWAR(b, sample.delim)
 		if gotFirst != expectedFirst {
-			t.Errorf("sample %d %q: IndexUnquotedSWAR = %d, parse.IndexUnquoted = %d", i, sample.input, gotFirst, expectedFirst)
+			t.Errorf("sample %d %q: IndexUnquotedSWAR = %d, scalar = %d", i, sample.input, gotFirst, expectedFirst)
 		}
 
 		// 2. Check SplitInlineValues parity
-		expectedTokens, expErr := parsepkg.SplitInlineValues(sample.input, delimRune)
+		expectedTokens, expErr := splitDelimsScalar(sample.input, sample.delim)
 		indices, inQuotes := FindDelimsSWAR(b, sample.delim, nil)
 		if expErr != nil {
 			if !inQuotes {

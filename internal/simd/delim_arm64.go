@@ -12,32 +12,19 @@ func FindDelimsNEON(data []byte, delim byte, dst []int) ([]int, bool) {
 	}
 
 	n := len(data)
-	inQuotes := false
-	processed := 0
-
-	for processed+16 <= n {
-		if cap(dst)-len(dst) < 16 {
-			grow := make([]int, len(dst), len(dst)*2+16)
-			copy(grow, dst)
-			dst = grow
-		}
-
-		newLen, inQuotesOut, bytesConsumed := findDelimsNEONAsm(data[processed:], delim, dst, inQuotes, processed)
-		dst = dst[:newLen]
-		inQuotes = inQuotesOut
-		processed += bytesConsumed
-
-		// If NEON stopped early (backslash or capacity), process remaining data with SWAR
-		if bytesConsumed < 16 && processed < n {
-			remData := data[processed:]
-			var swarDst []int
-			swarDst, inQuotes, _ = FindDelimsSWARWithState(remData, delim, nil, inQuotes, false)
-			for _, idx := range swarDst {
-				dst = append(dst, processed+idx)
-			}
-			return dst, inQuotes
-		}
+	if n < 16 {
+		return FindDelimsSWAR(data, delim, dst)
 	}
+
+	// Ensure sufficient capacity so assembly kernel never truncates mid-chunk
+	if cap(dst)-len(dst) < n {
+		grow := make([]int, len(dst), len(dst)+n)
+		copy(grow, dst)
+		dst = grow
+	}
+
+	newLen, inQuotes, processed := findDelimsNEONAsm(data, delim, dst, false, 0)
+	dst = dst[:newLen]
 
 	if processed < n {
 		var remIndices []int
@@ -45,7 +32,6 @@ func FindDelimsNEON(data []byte, delim byte, dst []int) ([]int, bool) {
 		for _, idx := range remIndices {
 			dst = append(dst, processed+idx)
 		}
-		return dst, inQuotes
 	}
 
 	return dst, inQuotes

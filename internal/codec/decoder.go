@@ -114,6 +114,8 @@ type parser struct {
 	preserveNumbers   bool
 	remainingNonBlank []int
 	nextNonBlank      []int
+	scratchTokens     []string
+	scratchDelims     []int
 }
 
 // These limits protect recursive parsing and header bookkeeping from hostile
@@ -401,11 +403,13 @@ func (p *parser) parseArray(header parsedHeader, depth int) (any, error) {
 	ctx := p.cfg
 
 	if len(header.inlineValues) > 0 {
-		raw, err := parsepkg.SplitInlineValues(header.inlineValues, delimiter)
+		var err error
+		p.scratchTokens, p.scratchDelims, err = parsepkg.SplitInlineValuesAppend(header.inlineValues, delimiter, p.scratchTokens[:0], p.scratchDelims[:0])
 		if err != nil {
 			return nil, errorWrap(p.lines[p.pos-1].number, err)
 		}
-		for _, token := range raw {
+		values = make([]any, 0, len(p.scratchTokens))
+		for _, token := range p.scratchTokens {
 			value, err := p.decodePrimitiveToken(token)
 			if err != nil {
 				return nil, errorWrap(p.lines[p.pos-1].number, err)
@@ -419,7 +423,7 @@ func (p *parser) parseArray(header parsedHeader, depth int) (any, error) {
 	}
 
 	if len(header.leafFields) > 0 {
-		rows := make([]any, 0)
+		rows := make([]any, 0, header.length)
 		for p.pos < len(p.lines) {
 			line := p.current()
 			if line.blank {
@@ -449,14 +453,15 @@ func (p *parser) parseArray(header parsedHeader, depth int) (any, error) {
 				break
 			}
 			p.pos++
-			raw, err := parsepkg.SplitInlineValues(trimmed, delimiter)
+			var err error
+			p.scratchTokens, p.scratchDelims, err = parsepkg.SplitInlineValuesAppend(trimmed, delimiter, p.scratchTokens[:0], p.scratchDelims[:0])
 			if err != nil {
 				return nil, errorWrap(line.number, err)
 			}
-			if ctx.strict && len(raw) != len(header.leafFields) {
+			if ctx.strict && len(p.scratchTokens) != len(header.leafFields) {
 				return nil, errorAt(line.number, "tabular row width mismatch")
 			}
-			row, err := decodeTabularRow(header.fieldTree, raw)
+			row, err := decodeTabularRow(header.fieldTree, p.scratchTokens)
 			if err != nil {
 				return nil, errorWrap(line.number, err)
 			}
@@ -649,10 +654,12 @@ func (p *parser) parseKeyedObject(header parsedHeader, depth int) (map[string]an
 		rest := trimSpaces(line.content[colon+1:])
 		var raw []string
 		if rest != "" {
-			raw, err = parsepkg.SplitInlineValues(rest, header.delimiter.rune())
+			var err error
+			p.scratchTokens, p.scratchDelims, err = parsepkg.SplitInlineValuesAppend(rest, header.delimiter.rune(), p.scratchTokens[:0], p.scratchDelims[:0])
 			if err != nil {
 				return nil, errorWrap(line.number, err)
 			}
+			raw = p.scratchTokens
 		}
 		if p.cfg.strict && len(raw) != len(header.leafFields) {
 			return nil, errorAt(line.number, "keyed entry row width mismatch")
@@ -1279,19 +1286,5 @@ func isKeyValue(content string) bool {
 }
 
 func indexOutsideQuotes(s string, target rune) int {
-	inQuotes := false
-	escaped := false
-	for idx, r := range s {
-		switch {
-		case escaped:
-			escaped = false
-		case r == '\\' && inQuotes:
-			escaped = true
-		case r == '"':
-			inQuotes = !inQuotes
-		case !inQuotes && r == target:
-			return idx
-		}
-	}
-	return -1
+	return parsepkg.IndexUnquoted(s, target)
 }

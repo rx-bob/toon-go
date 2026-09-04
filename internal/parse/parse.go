@@ -6,6 +6,9 @@ import (
 	"strconv"
 	"strings"
 	"unicode/utf8"
+	"unsafe"
+
+	"github.com/toon-format/toon-go/internal/simd"
 )
 
 // UnquoteString removes surrounding quotes and unescapes TOON strings.
@@ -69,19 +72,22 @@ func UnquoteString(token string) (string, error) {
 
 // IndexUnquoted returns the byte index of target outside quoted regions.
 func IndexUnquoted(s string, target rune) int {
+	if target < utf8.RuneSelf {
+		b := unsafe.Slice(unsafe.StringData(s), len(s))
+		return simd.IndexUnquotedAuto(b, byte(target))
+	}
 	inQuotes := false
-	for i := 0; i < len(s); i++ {
-		switch s[i] {
-		case '\\':
-			if inQuotes {
-				i++
-			}
-		case '"':
+	escaped := false
+	for idx, r := range s {
+		switch {
+		case escaped:
+			escaped = false
+		case r == '\\' && inQuotes:
+			escaped = true
+		case r == '"':
 			inQuotes = !inQuotes
-		default:
-			if !inQuotes && s[i] < utf8.RuneSelf && rune(s[i]) == target {
-				return i
-			}
+		case !inQuotes && r == target:
+			return idx
 		}
 	}
 	return -1
@@ -101,10 +107,41 @@ func trimSpaces(s string) string {
 
 // SplitInlineValues tokenizes a delimiter-separated list, respecting quoted segments.
 func SplitInlineValues(segment string, delimiter rune) ([]string, error) {
+	tokens, _, err := SplitInlineValuesAppend(segment, delimiter, nil, nil)
+	return tokens, err
+}
+
+// SplitInlineValuesAppend tokenizes a delimiter-separated list, respecting quoted segments,
+// appending tokens to dst and using delimsBuf to hold delimiter positions.
+func SplitInlineValuesAppend(segment string, delimiter rune, dst []string, delimsBuf []int) ([]string, []int, error) {
 	if trimSpaces(segment) == "" {
-		return nil, nil
+		return dst, delimsBuf, nil
 	}
-	var tokens []string
+
+	if delimiter < utf8.RuneSelf {
+		b := unsafe.Slice(unsafe.StringData(segment), len(segment))
+		delims, inQuotes := simd.FindDelimsAuto(b, byte(delimiter), delimsBuf)
+		if inQuotes {
+			return nil, delims, errors.New("unterminated string in delimited values")
+		}
+
+		needed := len(delims) + 1
+		if cap(dst)-len(dst) < needed {
+			grow := make([]string, len(dst), len(dst)+needed)
+			copy(grow, dst)
+			dst = grow
+		}
+
+		start := 0
+		for _, idx := range delims {
+			dst = append(dst, trimSpaces(segment[start:idx]))
+			start = idx + 1
+		}
+		dst = append(dst, trimSpaces(segment[start:]))
+		return dst, delims, nil
+	}
+
+	// Fallback for non-ASCII rune delimiters
 	inQuotes := false
 	escaped := false
 	start := 0
@@ -118,13 +155,13 @@ func SplitInlineValues(segment string, delimiter rune) ([]string, error) {
 		case r == '"':
 			inQuotes = !inQuotes
 		case r == delimiter && !inQuotes:
-			tokens = append(tokens, trimSpaces(segment[start:i]))
+			dst = append(dst, trimSpaces(segment[start:i]))
 			start = i + utf8.RuneLen(r)
 		}
 	}
 	if inQuotes {
-		return nil, errors.New("unterminated string in delimited values")
+		return nil, delimsBuf, errors.New("unterminated string in delimited values")
 	}
-	tokens = append(tokens, trimSpaces(segment[start:]))
-	return tokens, nil
+	dst = append(dst, trimSpaces(segment[start:]))
+	return dst, delimsBuf, nil
 }
