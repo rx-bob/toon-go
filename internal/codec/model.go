@@ -45,3 +45,18 @@ type decodedNumber struct {
 // maxSafeInteger mirrors JavaScript's Number.MAX_SAFE_INTEGER, the threshold at
 // which IEEE 754 double precision can no longer represent integers exactly.
 const maxSafeInteger = 9007199254740991
+
+// tabularColumn describes one column in a compiled tabular layout.
+type tabularColumn struct {
+	name        string
+	isNested    bool
+	childLayout *tabularLayout
+}
+
+// tabularLayout captures the compiled schema of a tabular array.
+type tabularLayout struct {
+	fields      []fieldNode
+	columns     []tabularColumn
+	rowMappings [][]int
+}
+

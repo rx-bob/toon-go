@@ -349,3 +349,271 @@ func TestAppendPrimitiveParity(t *testing.T) {
 		}
 	})
 }
+
+func legacyDetectTabular(values []normalizedValue) ([]fieldNode, bool) {
+	if len(values) == 0 {
+		return nil, false
+	}
+	first, ok := values[0].(Object)
+	if !ok || first.IsEmpty() {
+		return nil, false
+	}
+	fields := make([]fieldNode, len(first.Fields))
+	fieldSet := make(map[string]struct{}, len(first.Fields))
+	for i, field := range first.Fields {
+		column := make([]normalizedValue, 0, len(values))
+		for _, value := range values {
+			obj, rowOK := value.(Object)
+			if !rowOK {
+				return nil, false
+			}
+			column = append(column, objField(obj, field.Key))
+		}
+		var fieldOK bool
+		fields[i], fieldOK = legacyDetectFieldNode(field.Key, field.Value, column)
+		if !fieldOK {
+			return nil, false
+		}
+		fieldSet[field.Key] = struct{}{}
+	}
+	for _, value := range values[1:] {
+		obj, ok := value.(Object)
+		if !ok {
+			return nil, false
+		}
+		if len(obj.Fields) != len(fields) {
+			return nil, false
+		}
+		seen := make(map[string]struct{}, len(fields))
+		for _, field := range obj.Fields {
+			if _, ok := fieldSet[field.Key]; !ok {
+				return nil, false
+			}
+			seen[field.Key] = struct{}{}
+		}
+		if len(seen) != len(fields) {
+			return nil, false
+		}
+	}
+	return fields, true
+}
+
+func legacyDetectFieldNode(name string, firstValue normalizedValue, rows []normalizedValue) (fieldNode, bool) {
+	if isPrimitive(firstValue) {
+		for _, value := range rows {
+			if !isPrimitive(value) {
+				return fieldNode{}, false
+			}
+		}
+		return fieldNode{name: name}, true
+	}
+
+	firstObject, ok := firstValue.(Object)
+	if !ok || firstObject.IsEmpty() {
+		return fieldNode{}, false
+	}
+	children := make([]fieldNode, len(firstObject.Fields))
+	childSet := make(map[string]struct{}, len(firstObject.Fields))
+	for i, child := range firstObject.Fields {
+		childRows := make([]normalizedValue, 0, len(rows))
+		for _, value := range rows {
+			obj, ok := value.(Object)
+			if !ok {
+				return fieldNode{}, false
+			}
+			if obj.IsEmpty() {
+				return fieldNode{}, false
+			}
+			childRows = append(childRows, objField(obj, child.Key))
+		}
+		var childOK bool
+		children[i], childOK = legacyDetectFieldNode(child.Key, child.Value, childRows)
+		if !childOK {
+			return fieldNode{}, false
+		}
+		childSet[child.Key] = struct{}{}
+	}
+	for _, value := range rows {
+		obj, ok := value.(Object)
+		if !ok {
+			return fieldNode{}, false
+		}
+		if len(obj.Fields) != len(childSet) {
+			return fieldNode{}, false
+		}
+		for _, child := range obj.Fields {
+			if _, ok := childSet[child.Key]; !ok {
+				return fieldNode{}, false
+			}
+		}
+	}
+	return fieldNode{name: name, children: children}, true
+}
+
+func TestTabularLayoutEligibilityParity(t *testing.T) {
+	cases := []struct {
+		name   string
+		values []normalizedValue
+	}{
+		{
+			name: "stable_order_flat",
+			values: []normalizedValue{
+				NewObject(Field{Key: "a", Value: 1}, Field{Key: "b", Value: "x"}),
+				NewObject(Field{Key: "a", Value: 2}, Field{Key: "b", Value: "y"}),
+			},
+		},
+		{
+			name: "stable_order_nested",
+			values: []normalizedValue{
+				NewObject(Field{Key: "id", Value: 1}, Field{Key: "u", Value: NewObject(Field{Key: "name", Value: "Ada"})}),
+				NewObject(Field{Key: "id", Value: 2}, Field{Key: "u", Value: NewObject(Field{Key: "name", Value: "Bob"})}),
+			},
+		},
+		{
+			name: "reordered_keys_top",
+			values: []normalizedValue{
+				NewObject(Field{Key: "a", Value: 1}, Field{Key: "b", Value: 2}),
+				NewObject(Field{Key: "b", Value: 3}, Field{Key: "a", Value: 4}),
+			},
+		},
+		{
+			name: "reordered_keys_nested",
+			values: []normalizedValue{
+				NewObject(Field{Key: "u", Value: NewObject(Field{Key: "x", Value: 1}, Field{Key: "y", Value: 2})}),
+				NewObject(Field{Key: "u", Value: NewObject(Field{Key: "y", Value: 3}, Field{Key: "x", Value: 4})}),
+			},
+		},
+		{
+			name: "missing_key",
+			values: []normalizedValue{
+				NewObject(Field{Key: "a", Value: 1}, Field{Key: "b", Value: 2}),
+				NewObject(Field{Key: "a", Value: 3}),
+			},
+		},
+		{
+			name: "extra_key",
+			values: []normalizedValue{
+				NewObject(Field{Key: "a", Value: 1}),
+				NewObject(Field{Key: "a", Value: 2}, Field{Key: "b", Value: 3}),
+			},
+		},
+		{
+			name: "duplicate_key_first",
+			values: []normalizedValue{
+				Object{Fields: []Field{{Key: "a", Value: 1}, {Key: "a", Value: 2}}},
+			},
+		},
+		{
+			name: "duplicate_key_second",
+			values: []normalizedValue{
+				NewObject(Field{Key: "a", Value: 1}, Field{Key: "b", Value: 2}),
+				Object{Fields: []Field{{Key: "a", Value: 3}, {Key: "a", Value: 4}}},
+			},
+		},
+		{
+			name: "empty_first",
+			values: []normalizedValue{
+				NewObject(),
+			},
+		},
+		{
+			name: "empty_second",
+			values: []normalizedValue{
+				NewObject(Field{Key: "a", Value: 1}),
+				NewObject(),
+			},
+		},
+		{
+			name: "nested_empty_first",
+			values: []normalizedValue{
+				NewObject(Field{Key: "u", Value: NewObject()}),
+			},
+		},
+		{
+			name: "nested_empty_second",
+			values: []normalizedValue{
+				NewObject(Field{Key: "u", Value: NewObject(Field{Key: "x", Value: 1})}),
+				NewObject(Field{Key: "u", Value: NewObject()}),
+			},
+		},
+		{
+			name: "mixed_primitive_object",
+			values: []normalizedValue{
+				NewObject(Field{Key: "a", Value: 1}),
+				NewObject(Field{Key: "a", Value: NewObject(Field{Key: "x", Value: 2})}),
+			},
+		},
+		{
+			name: "mixed_object_primitive",
+			values: []normalizedValue{
+				NewObject(Field{Key: "a", Value: NewObject(Field{Key: "x", Value: 1})}),
+				NewObject(Field{Key: "a", Value: 2}),
+			},
+		},
+		{
+			name: "slice_column",
+			values: []normalizedValue{
+				NewObject(Field{Key: "a", Value: []normalizedValue{1, 2}}),
+				NewObject(Field{Key: "a", Value: []normalizedValue{3, 4}}),
+			},
+		},
+		{
+			name: "non_object_row",
+			values: []normalizedValue{
+				NewObject(Field{Key: "a", Value: 1}),
+				42,
+			},
+		},
+		{
+			name:   "empty_values",
+			values: []normalizedValue{},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gotFields, gotOK := detectTabular(tc.values)
+			wantFields, wantOK := legacyDetectTabular(tc.values)
+
+			if gotOK != wantOK {
+				t.Fatalf("detectTabular eligibility mismatch: got %v, want %v", gotOK, wantOK)
+			}
+			if gotOK {
+				gotLeaves := flattenFields(gotFields)
+				wantLeaves := flattenFields(wantFields)
+				if len(gotLeaves) != len(wantLeaves) {
+					t.Fatalf("leaf count mismatch: got %v, want %v", gotLeaves, wantLeaves)
+				}
+				for i := range gotLeaves {
+					if gotLeaves[i] != wantLeaves[i] {
+						t.Fatalf("leaf [%d] mismatch: got %q, want %q", i, gotLeaves[i], wantLeaves[i])
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestTabularLayoutAllocsScaling(t *testing.T) {
+	cfg := defaultEncoderOptions()
+	payload := generateTabularPayload(1000)
+	norm, err := normalize(payload.Users, cfg)
+	if err != nil {
+		t.Fatalf("normalize failed: %v", err)
+	}
+	rows := norm.([]normalizedValue)
+
+	// Tabular detection should allocate O(1) in row count (compiles 1 layout, 0 maps, 0 column slices)
+	allocs := testing.AllocsPerRun(100, func() {
+		_, ok := detectTabular(rows)
+		if !ok {
+			t.Fatal("expected tabular detection to succeed")
+		}
+	})
+
+	// 11 fields: cols slice (1), nodes slice (1), tabularLayout pointer (1) = 3 allocs.
+	// Certainly far below 1,000 allocs (which would indicate per-row maps or column slices).
+	if allocs > 10 {
+		t.Errorf("detectTabular(1000 rows) allocated %f times, expected <= 10 (no per-row map or slice)", allocs)
+	}
+}

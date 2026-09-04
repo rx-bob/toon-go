@@ -513,101 +513,182 @@ func (s *encodeState) encodeArrayForObjectListItem(keyLiteral string, values []n
 }
 
 func detectTabular(values []normalizedValue) ([]fieldNode, bool) {
+	layout, ok := compileTabularLayout(values)
+	if !ok {
+		return nil, false
+	}
+	return layout.fields, true
+}
+
+func compileTabularLayout(values []normalizedValue) (*tabularLayout, bool) {
 	if len(values) == 0 {
 		return nil, false
 	}
 	first, ok := values[0].(Object)
-	if !ok || first.IsEmpty() {
+	if !ok {
 		return nil, false
 	}
-	fields := make([]fieldNode, len(first.Fields))
-	fieldSet := make(map[string]struct{}, len(first.Fields))
-	for i, field := range first.Fields {
-		column := make([]normalizedValue, 0, len(values))
-		for _, value := range values {
-			obj, rowOK := value.(Object)
-			if !rowOK {
-				return nil, false
-			}
-			column = append(column, objField(obj, field.Key))
-		}
-		fields[i], ok = detectFieldNode(field.Key, field.Value, column)
+	layout, ok := buildTabularLayout(first)
+	if !ok {
+		return nil, false
+	}
+
+	var rowMappings [][]int
+	hasReordered := false
+
+	for i := 1; i < len(values); i++ {
+		obj, ok := values[i].(Object)
 		if !ok {
 			return nil, false
 		}
-		fieldSet[field.Key] = struct{}{}
-	}
-	for _, value := range values[1:] {
-		obj, ok := value.(Object)
-		if !ok {
+		mapping, valid := layout.validateRow(obj)
+		if !valid {
 			return nil, false
 		}
-		if len(obj.Fields) != len(fields) {
-			return nil, false
-		}
-		seen := make(map[string]struct{}, len(fields))
-		for _, field := range obj.Fields {
-			if _, ok := fieldSet[field.Key]; !ok {
-				return nil, false
+		if mapping != nil {
+			if !hasReordered {
+				rowMappings = make([][]int, len(values))
+				hasReordered = true
 			}
-			seen[field.Key] = struct{}{}
-		}
-		if len(seen) != len(fields) {
-			return nil, false
+			rowMappings[i] = mapping
 		}
 	}
-	return fields, true
+
+	if hasReordered {
+		layout.rowMappings = rowMappings
+	}
+	return layout, true
 }
 
-func detectFieldNode(name string, firstValue normalizedValue, rows []normalizedValue) (fieldNode, bool) {
-	if isPrimitive(firstValue) {
-		for _, value := range rows {
-			if !isPrimitive(value) {
-				return fieldNode{}, false
+func buildTabularLayout(first Object) (*tabularLayout, bool) {
+	if first.IsEmpty() {
+		return nil, false
+	}
+	cols := make([]tabularColumn, len(first.Fields))
+	nodes := make([]fieldNode, len(first.Fields))
+
+	for i := 0; i < len(first.Fields); i++ {
+		key := first.Fields[i].Key
+		for j := 0; j < i; j++ {
+			if first.Fields[j].Key == key {
+				return nil, false
 			}
 		}
-		return fieldNode{name: name}, true
+		val := first.Fields[i].Value
+		if isPrimitive(val) {
+			cols[i] = tabularColumn{name: key, isNested: false}
+			nodes[i] = fieldNode{name: key}
+		} else if obj, ok := val.(Object); ok {
+			childLayout, childOK := buildTabularLayout(obj)
+			if !childOK {
+				return nil, false
+			}
+			cols[i] = tabularColumn{name: key, isNested: true, childLayout: childLayout}
+			nodes[i] = fieldNode{name: key, children: childLayout.fields}
+		} else {
+			return nil, false
+		}
+	}
+	return &tabularLayout{
+		fields:  nodes,
+		columns: cols,
+	}, true
+}
+
+func (l *tabularLayout) validateRow(obj Object) ([]int, bool) {
+	n := len(l.columns)
+	if len(obj.Fields) != n {
+		return nil, false
 	}
 
-	firstObject, ok := firstValue.(Object)
-	if !ok || firstObject.IsEmpty() {
-		return fieldNode{}, false
-	}
-	children := make([]fieldNode, len(firstObject.Fields))
-	childSet := make(map[string]struct{}, len(firstObject.Fields))
-	for i, child := range firstObject.Fields {
-		childRows := make([]normalizedValue, 0, len(rows))
-		for _, value := range rows {
-			obj, ok := value.(Object)
-			if !ok {
-				return fieldNode{}, false
-			}
-			if obj.IsEmpty() {
-				return fieldNode{}, false
-			}
-			childRows = append(childRows, objField(obj, child.Key))
-		}
-		children[i], ok = detectFieldNode(child.Key, child.Value, childRows)
-		if !ok {
-			return fieldNode{}, false
-		}
-		childSet[child.Key] = struct{}{}
-	}
-	for _, value := range rows {
-		obj, ok := value.(Object)
-		if !ok {
-			return fieldNode{}, false
-		}
-		if len(obj.Fields) != len(childSet) {
-			return fieldNode{}, false
-		}
-		for _, child := range obj.Fields {
-			if _, ok := childSet[child.Key]; !ok {
-				return fieldNode{}, false
-			}
+	stable := true
+	for i := 0; i < n; i++ {
+		if obj.Fields[i].Key != l.columns[i].name {
+			stable = false
+			break
 		}
 	}
-	return fieldNode{name: name, children: children}, true
+
+	if stable {
+		for i := 0; i < n; i++ {
+			col := &l.columns[i]
+			val := obj.Fields[i].Value
+			if !col.isNested {
+				if !isPrimitive(val) {
+					return nil, false
+				}
+			} else {
+				childObj, ok := val.(Object)
+				if !ok || childObj.IsEmpty() {
+					return nil, false
+				}
+				if _, childOK := col.childLayout.validateRow(childObj); !childOK {
+					return nil, false
+				}
+			}
+		}
+		return nil, true
+	}
+
+	mapping := make([]int, n)
+	if n <= 64 {
+		var seen uint64
+		for j, f := range obj.Fields {
+			colIdx := -1
+			for k := 0; k < n; k++ {
+				if l.columns[k].name == f.Key {
+					colIdx = k
+					break
+				}
+			}
+			if colIdx < 0 {
+				return nil, false
+			}
+			if seen&(uint64(1)<<colIdx) != 0 {
+				return nil, false
+			}
+			seen |= uint64(1) << colIdx
+			mapping[colIdx] = j
+		}
+		if seen != (uint64(1)<<n)-1 {
+			return nil, false
+		}
+	} else {
+		seen := make([]bool, n)
+		for j, f := range obj.Fields {
+			colIdx := -1
+			for k := 0; k < n; k++ {
+				if l.columns[k].name == f.Key {
+					colIdx = k
+					break
+				}
+			}
+			if colIdx < 0 || seen[colIdx] {
+				return nil, false
+			}
+			seen[colIdx] = true
+			mapping[colIdx] = j
+		}
+	}
+
+	for colIdx := 0; colIdx < n; colIdx++ {
+		col := &l.columns[colIdx]
+		val := obj.Fields[mapping[colIdx]].Value
+		if !col.isNested {
+			if !isPrimitive(val) {
+				return nil, false
+			}
+		} else {
+			childObj, ok := val.(Object)
+			if !ok || childObj.IsEmpty() {
+				return nil, false
+			}
+			if _, childOK := col.childLayout.validateRow(childObj); !childOK {
+				return nil, false
+			}
+		}
+	}
+	return mapping, true
 }
 
 func flattenObjectValues(obj Object, fields []fieldNode) []normalizedValue {
