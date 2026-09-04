@@ -11,6 +11,7 @@ import (
 
 	formatpkg "github.com/toon-format/toon-go/internal/format"
 	parsepkg "github.com/toon-format/toon-go/internal/parse"
+	"github.com/toon-format/toon-go/internal/simd"
 )
 
 func bytesToString(b []byte) string {
@@ -182,18 +183,16 @@ func scanLines(input string) []scannedLine {
 	if strings.HasPrefix(input, "\ufeff") {
 		input = input[len("\ufeff"):]
 	}
-	lines := make([]scannedLine, 0, strings.Count(input, "\n")+1)
+	boundaries := simd.ScanLines(unsafe.Slice(unsafe.StringData(input), len(input)), nil)
+	lines := make([]scannedLine, 0, len(boundaries)+1)
 	start, number := 0, 1
-	for i := 0; i < len(input); i++ {
-		if input[i] != '\n' && input[i] != '\r' {
-			continue
-		}
-		lines = append(lines, makeScannedLine(number, input[start:i]))
+	for _, boundary := range boundaries {
+		lines = append(lines, makeScannedLine(number, input[start:boundary]))
 		number++
-		if input[i] == '\r' && i+1 < len(input) && input[i+1] == '\n' {
-			i++
+		start = boundary + 1
+		if input[boundary] == '\r' && start < len(input) && input[start] == '\n' {
+			start++
 		}
-		start = i + 1
 	}
 	if start < len(input) {
 		lines = append(lines, makeScannedLine(number, input[start:]))
@@ -217,8 +216,8 @@ func makeScannedLine(number int, line string) scannedLine {
 }
 
 func computeIndent(line string, cfg decoderOptions) (int, string, error) {
-	indent := 0
-	for i := 0; i < len(line); i++ {
+	indent := simd.LeadingSpaces(unsafe.Slice(unsafe.StringData(line), len(line)))
+	for i := indent; i < len(line); i++ {
 		switch line[i] {
 		case ' ':
 			indent++

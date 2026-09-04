@@ -25,6 +25,43 @@ func TestScanLinesDoesNotTreatTabIndentedHashAsComment(t *testing.T) {
 	}
 }
 
+func TestScanLinesPreservesLineBoundariesAcrossVectorStrides(t *testing.T) {
+	input := "123456789012345\r\n" + "a\nb\rc\r\nd"
+	lines := scanLines(input)
+	want := []struct {
+		number int
+		text   string
+	}{
+		{1, "123456789012345"}, {2, "a"}, {3, "b"}, {4, "c"}, {5, "d"},
+	}
+	if len(lines) != len(want) {
+		t.Fatalf("got %d lines, want %d", len(lines), len(want))
+	}
+	for i, expected := range want {
+		if lines[i].number != expected.number || lines[i].text != expected.text {
+			t.Errorf("line %d = %#v, want number=%d text=%q", i, lines[i], expected.number, expected.text)
+		}
+	}
+}
+
+func TestComputeIndentPreservesStrictAndTabSemantics(t *testing.T) {
+	strict := defaultDecoderOptions()
+	if _, _, err := computeIndent("  \tfield", strict); err == nil || err.Error() != "tabs are not allowed in indentation (strict mode)" {
+		t.Fatalf("strict tab error = %v", err)
+	}
+	if _, _, err := computeIndent("   field", strict); err == nil || err.Error() != "indentation must be a multiple of 2 spaces" {
+		t.Fatalf("strict width error = %v", err)
+	}
+	if indent, content, err := computeIndent("    field", strict); err != nil || indent != 2 || content != "field" {
+		t.Fatalf("strict indent = (%d, %q, %v)", indent, content, err)
+	}
+
+	nonStrict := decoderOptions{indentSize: 2, strict: false}
+	if indent, content, err := computeIndent("  \tfield", nonStrict); err != nil || indent != 2 || content != "field" {
+		t.Fatalf("non-strict indent = (%d, %q, %v)", indent, content, err)
+	}
+}
+
 func TestDecodePreservesLineNumberAfterCommentRemoval(t *testing.T) {
 	_, err := DecodeString("# removed\na: 1\n\tb: 2")
 	if err == nil || err.Error() != "line 3: tabs are not allowed in indentation (strict mode)" {

@@ -183,6 +183,30 @@ func NeedsQuotingAuto(data []byte, delim byte) bool {
 	return HasSpecialOrControlAuto(data, delim)
 }
 
+// ScanLines appends logical CR/LF line-break offsets using the optimal scanner
+// available on the host CPU.
+func ScanLines(data []byte, dst []int) []int {
+	if HasAVX2() && HasBMI2() {
+		return ScanLinesAVX2(data, dst)
+	}
+	if HasNEON() {
+		return ScanLinesNEON(data, dst)
+	}
+	return ScanLinesSWAR(data, dst)
+}
+
+// LeadingSpaces returns the number of initial ASCII spaces using the optimal
+// scanner available on the host CPU.
+func LeadingSpaces(data []byte) int {
+	if HasAVX2() && HasBMI2() {
+		return LeadingSpacesAVX2(data)
+	}
+	if HasNEON() {
+		return LeadingSpacesNEON(data)
+	}
+	return LeadingSpacesSWAR(data)
+}
+
 // HasEscapeOrControlScalar reports whether data contains '\\' or < 0x20 using a scalar loop.
 func HasEscapeOrControlScalar(data []byte) bool {
 	for _, b := range data {

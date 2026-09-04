@@ -11,7 +11,10 @@ official specification and fixture revision `v4.1.1` (submodule commit
 `62f16b369408180f1faf1cba7da1b46d1f336f12`).
 
 This library started out as a fork of https://github.com/toon-format/toon-go, as it had become unmaintained rather quickly after just 9 commits and seemingly abandoned.
-The goal is to have a high performance implementation of TOON (for go), which leverages modern hardware features such as SIMD by using tools such as avo while still maintaining portability between platforms. It includes assembly optimizations for both x86_64 and ARM64 but also specific features just for Apple Silicon. All of these platforms are 100% compatible and have to pass all the same tests, just some can achieve a higher velocity than others.
+
+The goal is to have a high performance implementation of TOON for Go, which leverages modern hardware features such as SIMD by using tools such as avo while still maintaining portability between platforms. It includes assembly optimizations for both x86_64 and ARM64 but also specific features just for Apple Silicon. 
+
+All of these platform implementations are 100% compatible and have to pass all the same tests, just some can achieve a higher velocity than others.
 
 ## Example
 
@@ -149,23 +152,6 @@ prevent stack exhaustion and excessive header work; they do not change the
 TOON format's logical nesting or document-size model. Declared array counts
 are validated but are never used to preallocate result storage, so a huge
 declared count with little input remains bounded by the input actually read.
-
-## Conformance checklist
-
-The release gate is defined in [`.github/workflows/tests.yml`](.github/workflows/tests.yml):
-
-- [ ] `go test ./... -count=1`
-- [ ] `go test -race ./... -count=1`
-- [ ] `go vet ./...` and clean `gofmt -l` output
-- [ ] `go test ./... -coverpkg=./...` reports implementation coverage
-- [ ] `go test ./tests -run '^TestSpec(Encode|Decode)Fixtures$' -count=1`
-- [ ] bounded fuzz targets in `tests/fuzz_test.go`
-- [ ] pinned reference corpus in `tests/differential`
-
-The conformance corpus is the v4.1.1 fixture revision above. Error wording,
-Go map encounter order, and values outside the shared JSON model are host
-implementation policy: callers should use `Object` for order and avoid
-treating `NaN`, infinities, or unsupported Go values as portable JSON data.
 
 ## Resources
 
