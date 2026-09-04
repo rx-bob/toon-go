@@ -2,6 +2,7 @@ package format
 
 import (
 	"fmt"
+	"math/rand"
 	"strings"
 	"testing"
 )
@@ -168,5 +169,193 @@ func TestQuoteString(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("QuoteString(%q) = %q, want %q", tt.input, got, tt.want)
 		}
+	}
+}
+
+func TestAppendFormatStringDifferential(t *testing.T) {
+	contexts := []struct {
+		name string
+		ctx  Context
+	}{
+		{"comma_in_array", Context{Active: ',', Document: ',', InArray: true}},
+		{"comma_not_in_array", Context{Active: ',', Document: ',', InArray: false}},
+		{"pipe_in_array", Context{Active: '|', Document: '|', InArray: true}},
+		{"pipe_not_in_array", Context{Active: '|', Document: '|', InArray: false}},
+		{"tab_in_array", Context{Active: '\t', Document: '\t', InArray: true}},
+		{"tab_not_in_array", Context{Active: '\t', Document: '\t', InArray: false}},
+	}
+
+	deterministicStrings := []string{
+		// Empty
+		"",
+		// Clean ASCII
+		"hello",
+		"alpha_numeric_123",
+		"a-b-c",
+		"property.name",
+		// Clean UTF-8
+		"東京",
+		"こんにちは",
+		"café",
+		"üñîçødé",
+		"🌟✨🎉",
+		// Keywords
+		"true",
+		"false",
+		"null",
+		// Numeric lookalikes
+		"0",
+		"42",
+		"-42",
+		"+42",
+		"0123",
+		"-0123",
+		"3.14159",
+		"-0.0",
+		".5",
+		"5.",
+		"1e10",
+		"2.5e-3",
+		"-1E+06",
+		// Delimiters
+		"a,b",
+		"a|b",
+		"a\tb",
+		"a:b",
+		"a#b",
+		// Escapes
+		"quote\"inside",
+		"back\\slash",
+		"line\nbreak",
+		"carriage\rreturn",
+		"tab\tinside",
+		"all\\\"in\none\rstring\t!",
+		// Whitespace padded
+		" leading",
+		"trailing ",
+		" both ",
+		"\tleadingTab",
+		"trailingTab\t",
+		// Prefixes
+		"-dashPrefix",
+		"#hashPrefix",
+		// Control chars 0x00 to 0x1f
+		"null\x00byte",
+		"ctrl\x01byte",
+		"bell\x07byte",
+		"escape\x1bbyte",
+		"unit\x1fsep",
+	}
+
+	for c := byte(0); c < 0x20; c++ {
+		deterministicStrings = append(deterministicStrings, fmt.Sprintf("prefix_%c_suffix", c))
+	}
+
+	dst := make([]byte, 0, 1024)
+	for _, tc := range contexts {
+		for _, s := range deterministicStrings {
+			want, wantErr := FormatString(s, tc.ctx)
+
+			gotBytes, gotErr := AppendFormatString(dst[:0], s, tc.ctx)
+
+			if (wantErr != nil) != (gotErr != nil) {
+				t.Fatalf("FormatString(%q, %v) err mismatch: want %v, got %v", s, tc.name, wantErr, gotErr)
+			}
+			if wantErr != nil {
+				if wantErr.Error() != gotErr.Error() {
+					t.Fatalf("FormatString(%q, %v) err msg mismatch: want %q, got %q", s, tc.name, wantErr.Error(), gotErr.Error())
+				}
+				continue
+			}
+
+			if string(gotBytes) != want {
+				t.Errorf("AppendFormatString(%q, %v) = %q, want %q", s, tc.name, string(gotBytes), want)
+			}
+
+			wantQuote, wantQuoteErr := QuoteString(s)
+			gotQuoteBytes := AppendQuoteString(dst[:0], s)
+			if wantQuoteErr != nil {
+				t.Fatalf("QuoteString(%q) unexpected error: %v", s, wantQuoteErr)
+			}
+			if string(gotQuoteBytes) != wantQuote {
+				t.Errorf("AppendQuoteString(%q) = %q, want %q", s, string(gotQuoteBytes), wantQuote)
+			}
+		}
+	}
+
+	// Randomized valid UTF-8 strings
+	rng := rand.New(rand.NewSource(42))
+	sampleRunes := []rune{
+		'a', 'b', 'Z', '0', '9', '_', '-', '.', ':', ',', '|', '\t', '\n', '\r', '"', '\\',
+		' ', ' ', ' ',
+		'é', 'ñ', 'ø', 'ü', '日', '本', '語', '🔥', '🚀',
+		rune(0x01), rune(0x08), rune(0x1b), rune(0x1f),
+	}
+
+	for i := 0; i < 500; i++ {
+		length := rng.Intn(40)
+		runes := make([]rune, length)
+		for j := range runes {
+			runes[j] = sampleRunes[rng.Intn(len(sampleRunes))]
+		}
+		s := string(runes)
+
+		for _, tc := range contexts {
+			want, wantErr := FormatString(s, tc.ctx)
+			gotBytes, gotErr := AppendFormatString(dst[:0], s, tc.ctx)
+
+			if (wantErr != nil) != (gotErr != nil) {
+				t.Fatalf("Random string %q (ctx %v) err mismatch: want %v, got %v", s, tc.name, wantErr, gotErr)
+			}
+			if wantErr == nil && string(gotBytes) != want {
+				t.Fatalf("Random string %q (ctx %v) mismatch: got %q, want %q", s, tc.name, string(gotBytes), want)
+			}
+		}
+
+		wantQuote, _ := QuoteString(s)
+		gotQuoteBytes := AppendQuoteString(dst[:0], s)
+		if string(gotQuoteBytes) != wantQuote {
+			t.Fatalf("Random string %q Quote mismatch: got %q, want %q", s, string(gotQuoteBytes), wantQuote)
+		}
+	}
+}
+
+func TestAppendFormatStringZeroAlloc(t *testing.T) {
+	ctx := Context{Active: ',', Document: ',', InArray: true}
+	cleanStr := "clean_identifier_without_quoting_needed"
+	quotedStr := "string with \"quotes\", commas, and \n newlines"
+
+	dst := make([]byte, 0, 1024)
+
+	// Clean string zero allocation test
+	cleanAllocs := testing.AllocsPerRun(1000, func() {
+		var err error
+		dst, err = AppendFormatString(dst[:0], cleanStr, ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+	})
+	if cleanAllocs != 0 {
+		t.Errorf("AppendFormatString clean string allocated %f times, want 0", cleanAllocs)
+	}
+
+	// Quoted string zero allocation test
+	quotedAllocs := testing.AllocsPerRun(1000, func() {
+		var err error
+		dst, err = AppendFormatString(dst[:0], quotedStr, ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+	})
+	if quotedAllocs != 0 {
+		t.Errorf("AppendFormatString quoted string allocated %f times, want 0", quotedAllocs)
+	}
+
+	// AppendQuoteString zero allocation test
+	quoteAllocs := testing.AllocsPerRun(1000, func() {
+		dst = AppendQuoteString(dst[:0], quotedStr)
+	})
+	if quoteAllocs != 0 {
+		t.Errorf("AppendQuoteString allocated %f times, want 0", quoteAllocs)
 	}
 }
