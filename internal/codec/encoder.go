@@ -29,21 +29,30 @@ func (e *Encoder) Marshal(v any) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	state := &encodeState{cfg: e.cfg}
+	state := &encodeState{
+		cfg: e.cfg,
+		buf: newEncBuffer(estimateBufferSize(normalized)),
+	}
 	if err := state.encodeRoot(normalized); err != nil {
 		return nil, err
 	}
-	output := strings.Join(state.lines, "\n")
-	return []byte(output), nil
+	return state.buf.Bytes(), nil
 }
 
 // MarshalString is equivalent to Marshal but returns a string.
 func (e *Encoder) MarshalString(v any) (string, error) {
-	data, err := e.Marshal(v)
+	normalized, err := normalize(v, e.cfg)
 	if err != nil {
 		return "", err
 	}
-	return string(data), nil
+	state := &encodeState{
+		cfg: e.cfg,
+		buf: newEncBuffer(estimateBufferSize(normalized)),
+	}
+	if err := state.encodeRoot(normalized); err != nil {
+		return "", err
+	}
+	return state.buf.String(), nil
 }
 
 // Marshal encodes v using a temporary encoder.
@@ -57,12 +66,25 @@ func MarshalString(v any, opts ...EncoderOption) (string, error) {
 }
 
 type encodeState struct {
-	cfg   encoderOptions
-	lines []string
+	cfg encoderOptions
+	buf encBuffer
+}
+
+func (s *encodeState) startLine() {
+	if s.buf.Len() > 0 {
+		s.buf.WriteByte('\n')
+	}
 }
 
 func (s *encodeState) emit(line string) {
-	s.lines = append(s.lines, line)
+	s.startLine()
+	s.buf.WriteString(line)
+}
+
+func (s *encodeState) writeIndent(depth int) {
+	if depth > 0 {
+		s.buf.WriteSpaces(depth * s.cfg.indentSize)
+	}
 }
 
 func (s *encodeState) indent(depth int) string {
@@ -179,38 +201,43 @@ func (s *encodeState) encodeArray(key string, values []normalizedValue, depth in
 			return nil
 		}
 		header := renderHeader(keyLiteral, len(values), delimiter, false, nil)
-		line := indent + header
+		s.startLine()
+		s.writeIndent(depth)
+		s.buf.WriteString(header)
 		if len(values) > 0 {
-			inline := make([]string, 0, len(values))
-			for _, v := range values {
+			s.buf.WriteByte(' ')
+			for i, v := range values {
+				if i > 0 {
+					s.buf.WriteRune(delimiter.rune())
+				}
 				token, err := formatPrimitive(v, ctx)
 				if err != nil {
 					return err
 				}
-				inline = append(inline, token)
+				s.buf.WriteString(token)
 			}
-			line += " " + strings.Join(inline, string(delimiter.rune()))
 		}
-		s.emit(line)
 		return nil
 	}
 
 	if fields, ok := detectTabular(values); ok {
 		header := renderHeader(keyLiteral, len(values), delimiter, false, fields)
 		s.emit(indent + header)
+		delimRune := delimiter.rune()
 		for _, row := range values {
 			obj := row.(Object)
-			rowLine := s.indent(depth + 1)
-			rowValues := make([]string, 0)
-			for _, field := range flattenObjectValues(obj, fields) {
+			s.startLine()
+			s.writeIndent(depth + 1)
+			for i, field := range flattenObjectValues(obj, fields) {
+				if i > 0 {
+					s.buf.WriteRune(delimRune)
+				}
 				token, err := formatPrimitive(field, ctx)
 				if err != nil {
 					return err
 				}
-				rowValues = append(rowValues, token)
+				s.buf.WriteString(token)
 			}
-			rowLine += strings.Join(rowValues, string(delimiter.rune()))
-			s.emit(rowLine)
 		}
 		return nil
 	}
@@ -375,8 +402,15 @@ func (s *encodeState) encodeKeyedObject(obj Object, keyLiteral string, depth int
 			return false, err
 		}
 		entry := entries[i].(Object)
-		cells := make([]string, 0)
-		for _, value := range flattenObjectValues(entry, fields) {
+		s.startLine()
+		s.writeIndent(rowDepth)
+		s.buf.WriteString(entryKey)
+		s.buf.WriteString(": ")
+		delimRune := s.cfg.delimiter.rune()
+		for j, value := range flattenObjectValues(entry, fields) {
+			if j > 0 {
+				s.buf.WriteRune(delimRune)
+			}
 			token, err := formatPrimitive(value, formatContext{
 				active:   s.cfg.delimiter,
 				document: s.cfg.delimiter,
@@ -385,9 +419,8 @@ func (s *encodeState) encodeKeyedObject(obj Object, keyLiteral string, depth int
 			if err != nil {
 				return false, err
 			}
-			cells = append(cells, token)
+			s.buf.WriteString(token)
 		}
-		s.emit(s.indent(rowDepth) + entryKey + ": " + strings.Join(cells, string(s.cfg.delimiter.rune())))
 	}
 	return true, nil
 }
@@ -403,18 +436,21 @@ func (s *encodeState) encodeArrayForObjectListItem(keyLiteral string, values []n
 		if fields, ok := detectTabular(values); ok {
 			header := renderHeader(keyLiteral, len(values), delimiter, false, fields)
 			s.emit(indent + "- " + header)
+			delimRune := delimiter.rune()
 			for _, row := range values {
 				obj := row.(Object)
-				rowLine := s.indent(depth + 2)
-				rowValues := make([]string, 0)
-				for _, field := range flattenObjectValues(obj, fields) {
+				s.startLine()
+				s.writeIndent(depth + 2)
+				for i, field := range flattenObjectValues(obj, fields) {
+					if i > 0 {
+						s.buf.WriteRune(delimRune)
+					}
 					token, err := formatPrimitive(field, ctx)
 					if err != nil {
 						return err
 					}
-					rowValues = append(rowValues, token)
+					s.buf.WriteString(token)
 				}
-				s.emit(rowLine + strings.Join(rowValues, string(delimiter.rune())))
 			}
 			return nil
 		}
@@ -430,19 +466,23 @@ func (s *encodeState) encodeArrayForObjectListItem(keyLiteral string, values []n
 			return nil
 		}
 		header := renderHeader(keyLiteral, len(values), delimiter, false, nil)
-		line := indent + "- " + header
+		s.startLine()
+		s.writeIndent(depth)
+		s.buf.WriteString("- ")
+		s.buf.WriteString(header)
 		if len(values) > 0 {
-			inline := make([]string, 0, len(values))
-			for _, v := range values {
+			s.buf.WriteByte(' ')
+			for i, v := range values {
+				if i > 0 {
+					s.buf.WriteRune(delimiter.rune())
+				}
 				token, err := formatPrimitive(v, ctx)
 				if err != nil {
 					return err
 				}
-				inline = append(inline, token)
+				s.buf.WriteString(token)
 			}
-			line += " " + strings.Join(inline, string(delimiter.rune()))
 		}
-		s.emit(line)
 		return nil
 	}
 
