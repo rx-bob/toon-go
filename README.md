@@ -10,6 +10,9 @@ This implementation targets `toon-spec: 4.1` and is tested against the
 official specification and fixture revision `v4.1.1` (submodule commit
 `62f16b369408180f1faf1cba7da1b46d1f336f12`).
 
+This library started out as a fork of https://github.com/toon-format/toon-go, as it had become unmaintained rather quickly after just 9 commits and seemingly abandoned.
+The goal is to have a high performance implementation of TOON (for go), which leverages modern hardware features such as SIMD by using tools such as avo while still maintaining portability between platforms. It includes assembly optimizations for both x86_64 and ARM64 but also specific features just for Apple Silicon. All of these platforms are 100% compatible and have to pass all the same tests, just some can achieve a higher velocity than others.
+
 ## Example
 
 **JSON** (verbose):
@@ -39,7 +42,7 @@ package main
 import (
     "fmt"
 
-    "github.com/toon-format/toon-go"
+    "github.com/rx-bob/toon-go"
 )
 
 type User struct {
@@ -101,7 +104,7 @@ package main
 
 import (
     "fmt"
-    "github.com/toon-format/toon-go"
+    "github.com/rx-bob/toon-go"
 )
 
 func main() {
@@ -171,10 +174,7 @@ treating `NaN`, infinities, or unsupported Go values as portable JSON data.
 - [Benchmarks & Performance](https://github.com/toon-format/toon#benchmarks)
 - [Other Language Implementations](https://github.com/toon-format/toon#other-implementations)
 
-## Contributing
-
-Interested in implementing TOON for Go? Check out the [specification](https://github.com/toon-format/spec/blob/main/SPEC.md) and feel free to contribute!
-
 ## License
 
-MIT License © 2025-PRESENT [Johann Schopplich](https://github.com/johannschopplich)
+MIT License © 2025-PRESENT [Johann Schopplich](https://github.com/johannschopplich) for the original toon-format/toon-go
+MIT License © 2026-PRESENT [Bob](https://github.com/rx-bob) for this very fork
