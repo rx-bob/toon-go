@@ -57,6 +57,9 @@ func ScanDelimAuto(data []byte, delim byte) int {
 
 // FindDelimsAuto finds all unquoted occurrences of delim in data using the optimal algorithm for the host CPU.
 func FindDelimsAuto(data []byte, delim byte, dst []int) ([]int, bool) {
+	if HasAVX2() && HasBMI2() {
+		return FindDelimsAVX2(data, delim, dst)
+	}
 	return FindDelimsSWAR(data, delim, dst)
 }
 
@@ -115,46 +118,10 @@ func ScanDelimSWAR(data []byte, delim byte) int {
 
 // ScanDelimAVX2 counts unquoted occurrences of delim using a 32-byte vector stride.
 // On non-amd64 systems, it falls back to SWAR.
+// ScanDelimAVX2 counts unquoted occurrences of delim using AVX2.
+// On non-amd64 systems or when AVX2 is unavailable, it falls back to SWAR.
 func ScanDelimAVX2(data []byte, delim byte) int {
-	if !HasAVX2() || !HasBMI2() {
-		return ScanDelimSWAR(data, delim)
-	}
-
-	count := 0
-	inQuotes := false
-	i := 0
-	n := len(data)
-
-	// 32-byte vector stride pass
-	for i+32 <= n && !inQuotes {
-		w0 := binary.LittleEndian.Uint64(data[i:])
-		w1 := binary.LittleEndian.Uint64(data[i+8:])
-		w2 := binary.LittleEndian.Uint64(data[i+16:])
-		w3 := binary.LittleEndian.Uint64(data[i+24:])
-
-		quotes := hasByte64(w0, '"') | hasByte64(w1, '"') | hasByte64(w2, '"') | hasByte64(w3, '"')
-		slashes := hasByte64(w0, '\\') | hasByte64(w1, '\\') | hasByte64(w2, '\\') | hasByte64(w3, '\\')
-
-		if (quotes | slashes) == 0 {
-			delims := hasByte64(w0, delim) | hasByte64(w1, delim) | hasByte64(w2, delim) | hasByte64(w3, delim)
-			if delims != 0 {
-				count += bits.OnesCount64(hasByte64(w0, delim)) +
-					bits.OnesCount64(hasByte64(w1, delim)) +
-					bits.OnesCount64(hasByte64(w2, delim)) +
-					bits.OnesCount64(hasByte64(w3, delim))
-			}
-			i += 32
-			continue
-		}
-		break
-	}
-
-	// Remainder processed with SWAR
-	if i < n {
-		count += ScanDelimSWAR(data[i:], delim)
-	}
-
-	return count
+	return CountDelimsAVX2(data, delim)
 }
 
 // ScanDelimNEON counts unquoted occurrences of delim using a 16-byte vector stride.

@@ -2,6 +2,8 @@ package simd
 
 import (
 	"bytes"
+	"fmt"
+	"math/rand"
 	"strings"
 	"testing"
 
@@ -438,5 +440,100 @@ func TestSWAR_ParityWithParse(t *testing.T) {
 		}
 	}
 }
+
+func TestAVX2_DifferentialAgainstSWAR_10000Rows(t *testing.T) {
+	if !HasAVX2() || !HasBMI2() {
+		t.Skip("skipping AVX2 differential test: host CPU does not support AVX2+BMI2")
+	}
+
+	rng := rand.New(rand.NewSource(42))
+	delims := []byte{',', '\t', '|', ';', ':'}
+
+	for rowIdx := 0; rowIdx < 10000; rowIdx++ {
+		delim := delims[rng.Intn(len(delims))]
+		numCols := rng.Intn(20) + 1
+		var rowParts [][]byte
+
+		for col := 0; col < numCols; col++ {
+			fieldMode := rng.Intn(6)
+			var field []byte
+			switch fieldMode {
+			case 0: // Plain alphanumeric
+				length := rng.Intn(40)
+				field = make([]byte, length)
+				for k := range field {
+					field[k] = byte('a' + rng.Intn(26))
+				}
+			case 1: // Quoted with embedded delimiter
+				field = []byte(fmt.Sprintf("\"field_%d_%c_val\"", col, delim))
+			case 2: // Escaped quotes inside quoted string
+				field = []byte(`"escaped \" quote"`)
+			case 3: // Double backslashes
+				field = []byte(`"escaped \\ backslash"`)
+			case 4: // Empty field
+				field = []byte("")
+			case 5: // Variable length padding spanning 32-byte chunk boundary
+				length := 31 + (rng.Intn(5) - 2) // 29..33 bytes
+				field = bytes.Repeat([]byte{'x'}, length)
+			}
+			rowParts = append(rowParts, field)
+		}
+
+		row := bytes.Join(rowParts, []byte{delim})
+
+		// SWAR Baseline Outputs
+		wantIndices, wantInQuotes := FindDelimsSWAR(row, delim, nil)
+		wantCount := ScanDelimSWAR(row, delim)
+
+		// AVX2 Kernel Outputs
+		gotIndices, gotInQuotes := FindDelimsAVX2(row, delim, nil)
+		gotCount := ScanDelimAVX2(row, delim)
+
+		if gotInQuotes != wantInQuotes {
+			t.Fatalf("row %d: inQuotes mismatch: AVX2=%v, SWAR=%v, input=%q", rowIdx, gotInQuotes, wantInQuotes, row)
+		}
+		if gotCount != wantCount {
+			t.Fatalf("row %d: count mismatch: AVX2=%d, SWAR=%d, input=%q", rowIdx, gotCount, wantCount, row)
+		}
+		if len(gotIndices) != len(wantIndices) {
+			t.Fatalf("row %d: indices length mismatch: AVX2=%v (len %d), SWAR=%v (len %d), input=%q",
+				rowIdx, gotIndices, len(gotIndices), wantIndices, len(wantIndices), row)
+		}
+		for k := range gotIndices {
+			if gotIndices[k] != wantIndices[k] {
+				t.Fatalf("row %d: index[%d] mismatch: AVX2=%d, SWAR=%d, input=%q",
+					rowIdx, k, gotIndices[k], wantIndices[k], row)
+			}
+		}
+	}
+}
+
+func TestAVX2_FallbackOnSimulatedDisabled(t *testing.T) {
+	restore := SetCPUFeaturesForTest(CPUFeatures{HasAVX2: false, HasBMI2: false, HasNEON: false})
+	defer restore()
+
+	input := []byte("users[2]{id,name}:\n 1,alice\n 2,bob\n")
+	indices, inQuotes := FindDelimsAVX2(input, ',', nil)
+	swarIndices, swarInQuotes := FindDelimsSWAR(input, ',', nil)
+
+	if inQuotes != swarInQuotes {
+		t.Errorf("inQuotes mismatch: %v vs %v", inQuotes, swarInQuotes)
+	}
+	if len(indices) != len(swarIndices) {
+		t.Fatalf("indices length mismatch: %v vs %v", indices, swarIndices)
+	}
+	for i := range indices {
+		if indices[i] != swarIndices[i] {
+			t.Errorf("index[%d] = %d, want %d", i, indices[i], swarIndices[i])
+		}
+	}
+
+	count := CountDelimsAVX2(input, ',')
+	swarCount := CountDelimsSWAR(input, ',')
+	if count != swarCount {
+		t.Errorf("count = %d, want %d", count, swarCount)
+	}
+}
+
 
 
