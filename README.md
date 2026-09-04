@@ -6,6 +6,20 @@
 
 **Token-Oriented Object Notation** is a compact, human-readable format designed for passing structured data to Large Language Models with significantly reduced token usage.
 
+## SIMD performance
+
+Measured on Apple M1 with synthetic TOON workloads; results vary by CPU and document shape.
+
+| Path | Before | Now | Gain |
+|---|---:|---:|---:|
+| Tabular marshal, 1k rows | 2.01 ms | 1.96 ms | ~3% faster |
+| Tabular unmarshal, 1k rows | 3.21 ms | 1.66 ms | **1.93× faster** |
+| Inline split, 1k clean fields | 147 µs | 16.9 µs | **8.7× faster** |
+| `NeedsQuoting`, clean 500B | 602 ns | 57 ns | **10.5× faster** |
+| Scan 10k LF lines | 518 µs | 204 µs | **2.5× faster** |
+
+Tabular decoding allocations dropped from 38,885 to 15,084 per operation (~61%).
+
 This implementation targets `toon-spec: 4.1` and is tested against the
 official specification and fixture revision `v4.1.1` (submodule commit
 `62f16b369408180f1faf1cba7da1b46d1f336f12`).
