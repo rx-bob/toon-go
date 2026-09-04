@@ -396,31 +396,36 @@ func (s *encodeState) encodeArrayForObjectListItem(keyLiteral string, values []n
 	delimiter := ctx.active
 	indent := s.indent(depth)
 
-	if fields, ok := detectTabular(values); ok {
-		header := renderHeader(keyLiteral, len(values), delimiter, false, fields)
-		s.emit(indent + "- " + header)
-		for _, row := range values {
-			obj := row.(Object)
-			rowLine := s.indent(depth + 2)
-			rowValues := make([]string, 0)
-			for _, field := range flattenObjectValues(obj, fields) {
-				token, err := formatPrimitive(field, ctx)
-				if err != nil {
-					return err
+	// Anonymous nested arrays use list form in a list-item position, even
+	// when their elements happen to be tabular-shaped. A fields-bearing
+	// header here would change the required §10 layout.
+	if keyLiteral != "" {
+		if fields, ok := detectTabular(values); ok {
+			header := renderHeader(keyLiteral, len(values), delimiter, false, fields)
+			s.emit(indent + "- " + header)
+			for _, row := range values {
+				obj := row.(Object)
+				rowLine := s.indent(depth + 2)
+				rowValues := make([]string, 0)
+				for _, field := range flattenObjectValues(obj, fields) {
+					token, err := formatPrimitive(field, ctx)
+					if err != nil {
+						return err
+					}
+					rowValues = append(rowValues, token)
 				}
-				rowValues = append(rowValues, token)
+				s.emit(rowLine + strings.Join(rowValues, string(delimiter.rune())))
 			}
-			s.emit(rowLine + strings.Join(rowValues, string(delimiter.rune())))
+			return nil
 		}
-		return nil
 	}
 
 	if isPrimitiveArray(values) {
 		if len(values) == 0 {
-			if keyLiteral == "" {
-				s.emit(indent + "- []")
-			} else {
+			if keyLiteral != "" {
 				s.emit(indent + "- " + keyLiteral + ": []")
+			} else {
+				s.emit(indent + "- [0]:")
 			}
 			return nil
 		}
@@ -443,8 +448,12 @@ func (s *encodeState) encodeArrayForObjectListItem(keyLiteral string, values []n
 
 	header := renderHeader(keyLiteral, len(values), delimiter, false, nil)
 	s.emit(indent + "- " + header)
+	childDepth := depth + 1
+	if keyLiteral != "" {
+		childDepth++
+	}
 	for _, item := range values {
-		if err := s.encodeListItem(item, depth+2, ctx); err != nil {
+		if err := s.encodeListItem(item, childDepth, ctx); err != nil {
 			return err
 		}
 	}
