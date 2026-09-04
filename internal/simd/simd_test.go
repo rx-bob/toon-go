@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"math/rand"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -1170,6 +1171,57 @@ func TestNEON_Classifier_DifferentialAgainstSWAR_10000Rows(t *testing.T) {
 		wantSpecIdx := IndexSpecialOrControlSWAR(buf, delim)
 		if gotSpecIdx != wantSpecIdx {
 			t.Fatalf("row %d: IndexSpecialOrControl mismatch: NEON=%d, SWAR=%d, delim=%q, buf=%q", rowIdx, gotSpecIdx, wantSpecIdx, delim, buf)
+		}
+	}
+}
+
+func TestScanLinesSWAR(t *testing.T) {
+	tests := []struct {
+		name string
+		data string
+		want []int
+	}{
+		{"empty", "", nil},
+		{"no break", "field: value", nil},
+		{"lf", "a\nb\nc", []int{1, 3}},
+		{"cr", "a\rb\rc", []int{1, 3}},
+		{"crlf", "a\r\nb\r\nc", []int{1, 4}},
+		{"mixed", "a\r\nb\nc\rd", []int{1, 4, 6}},
+		{"word boundaries", "1234567\n1234567\r1234567\r\nend", []int{7, 15, 23}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ScanLinesSWAR([]byte(tt.data), nil)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("ScanLinesSWAR(%q) = %v, want %v", tt.data, got, tt.want)
+			}
+			prefix := []int{99}
+			got = ScanLinesSWAR([]byte(tt.data), prefix)
+			want := append([]int{99}, tt.want...)
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("ScanLinesSWAR append = %v, want %v", got, want)
+			}
+		})
+	}
+}
+
+func TestComputeIndentSWAR(t *testing.T) {
+	tests := []struct {
+		data string
+		want int
+	}{
+		{"", 0}, {"value", 0}, {" value", 1}, {"  value", 2},
+		{"       value", 7}, {"        value", 8}, {"                value", 16},
+		{"    \tvalue", 4}, {"  \u00a0value", 2}, {"                    ", 20},
+	}
+	for _, tt := range tests {
+		got := ComputeIndentSWAR([]byte(tt.data))
+		if got != tt.want {
+			t.Errorf("ComputeIndentSWAR(%q) = %d, want %d", tt.data, got, tt.want)
+		}
+		if leading := LeadingSpacesSWAR([]byte(tt.data)); leading != tt.want {
+			t.Errorf("LeadingSpacesSWAR(%q) = %d, want %d", tt.data, leading, tt.want)
 		}
 	}
 }

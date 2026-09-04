@@ -433,3 +433,58 @@ func IndexSpecialOrControlSWAR(data []byte, delim byte) int {
 func NeedsQuotingSWAR(data []byte, delim byte) bool {
 	return HasSpecialOrControlSWAR(data, delim)
 }
+
+const highBits64 = 0x8080808080808080
+
+// ScanLinesSWAR appends offsets of logical line breaks in data to dst. Both
+// LF and CR terminate a line; a CRLF pair contributes one offset at its CR.
+// The caller may reuse dst to avoid allocations.
+func ScanLinesSWAR(data []byte, dst []int) []int {
+	n := len(data)
+	i := 0
+	for i+8 <= n {
+		w := binary.LittleEndian.Uint64(data[i:])
+		breaks := hasByte64(w, '\n') | hasByte64(w, '\r')
+		for breaks != 0 {
+			offset := i + (bits.TrailingZeros64(breaks) >> 3)
+			if data[offset] != '\n' || offset == 0 || data[offset-1] != '\r' {
+				dst = append(dst, offset)
+			}
+			breaks &= breaks - 1
+		}
+		i += 8
+	}
+	for ; i < n; i++ {
+		if data[i] != '\n' && data[i] != '\r' {
+			continue
+		}
+		if data[i] != '\n' || i == 0 || data[i-1] != '\r' {
+			dst = append(dst, i)
+		}
+	}
+	return dst
+}
+
+// LeadingSpacesSWAR returns number of consecutive ASCII space bytes at data's
+// beginning using 64-bit word comparisons and a scalar tail.
+func LeadingSpacesSWAR(data []byte) int {
+	i := 0
+	for i+8 <= len(data) {
+		w := binary.LittleEndian.Uint64(data[i:])
+		spaces := hasByte64(w, ' ')
+		if spaces != highBits64 {
+			nonSpaces := (^spaces) & highBits64
+			return i + (bits.TrailingZeros64(nonSpaces) >> 3)
+		}
+		i += 8
+	}
+	for i < len(data) && data[i] == ' ' {
+		i++
+	}
+	return i
+}
+
+// ComputeIndentSWAR returns the initial ASCII-space indentation width.
+func ComputeIndentSWAR(data []byte) int {
+	return LeadingSpacesSWAR(data)
+}
