@@ -3,7 +3,6 @@ package simd
 import (
 	"encoding/binary"
 	"math/bits"
-	"runtime"
 )
 
 // Algorithm specifies which delimiter scanning implementation to execute.
@@ -35,14 +34,25 @@ func (a Algorithm) String() string {
 	}
 }
 
-// HasAVX2 reports whether AVX2 instructions are supported by the current CPU.
-func HasAVX2() bool {
-	return runtime.GOARCH == "amd64"
+// DelimScanner abstracts delimiter scanning implementations.
+type DelimScanner interface {
+	ScanDelim(data []byte, delim byte) int
 }
 
-// HasNEON reports whether ARM64 NEON vector instructions are supported by the current CPU.
-func HasNEON() bool {
-	return runtime.GOARCH == "arm64"
+// SelectBestAlgorithm selects the optimal scanning algorithm based on runtime CPU capabilities.
+func SelectBestAlgorithm() Algorithm {
+	if HasAVX2() && HasBMI2() {
+		return AlgoAVX2
+	}
+	if HasNEON() {
+		return AlgoNEON
+	}
+	return AlgoSWAR
+}
+
+// ScanDelimAuto scans data for delim using the optimal algorithm for the host CPU.
+func ScanDelimAuto(data []byte, delim byte) int {
+	return ScanDelim(data, delim, SelectBestAlgorithm())
 }
 
 // ScanDelim dispatches delimiter scanning to the requested algorithm.
@@ -166,7 +176,7 @@ func ScanDelimSWAR(data []byte, delim byte) int {
 // ScanDelimAVX2 counts unquoted occurrences of delim using a 32-byte vector stride.
 // On non-amd64 systems, it falls back to SWAR.
 func ScanDelimAVX2(data []byte, delim byte) int {
-	if !HasAVX2() {
+	if !HasAVX2() || !HasBMI2() {
 		return ScanDelimSWAR(data, delim)
 	}
 
