@@ -56,7 +56,7 @@ func main() {
         },
     }
 
-    encoded, err := toon.Marshal(in, toon.WithLengthMarkers(true))
+    encoded, err := toon.Marshal(in)
     if err != nil {
         panic(err)
     }
@@ -81,6 +81,12 @@ if err := toon.Unmarshal(encoded, &doc); err != nil {
 }
 fmt.Printf("users: %#v\n", doc["users"])
 ```
+
+Go map iteration does not preserve TOON encounter order. Use `toon.Object` and
+`toon.NewObject` when field order matters during encoding; `Object` preserves
+its field order recursively. Decoding into maps follows normal Go map
+semantics, while tabular and keyed decoding use their declared field order
+when materializing values.
 
 ### Decode Without Structs
 
@@ -114,6 +120,12 @@ integers, precise decimals, and out-of-range exponents retain their valid
 numeric lexeme instead of being rounded. Invalid `json.Number` lexemes are
 encoded as strings. Native integers outside the safe `float64` integer range
 remain strings for lossless decoding.
+
+Decoding is strict by default. Use `WithStrictMode(false)` for documented
+non-strict policies, including last-write-wins duplicate keys. `WithDelimiter`
+sets the delimiter for all emitted array scopes. `WithDocumentDelimiter`,
+`WithArrayDelimiter`, and `WithLengthMarkers` remain available only as
+deprecated compatibility aliases; length markers are ignored in v4.1.
 
 ## Resources
 
