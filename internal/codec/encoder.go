@@ -221,22 +221,17 @@ func (s *encodeState) encodeArray(key string, values []normalizedValue, depth in
 		return nil
 	}
 
-	if fields, ok := detectTabular(values); ok {
+	if layout, ok := compileTabularLayout(values); ok {
 		s.startLine()
 		s.writeIndent(depth)
-		s.buf.appendHeader(keyLiteral, len(values), delimiter, fields)
+		s.buf.appendHeader(keyLiteral, len(values), delimiter, layout.fields)
 		delimRune := delimiter.rune()
-		for _, row := range values {
+		for rowIndex, row := range values {
 			obj := row.(Object)
 			s.startLine()
 			s.writeIndent(depth + 1)
-			for i, field := range flattenObjectValues(obj, fields) {
-				if i > 0 {
-					s.buf.WriteRune(delimRune)
-				}
-				if err := s.buf.appendPrimitive(field, ctx); err != nil {
-					return err
-				}
+			if err := layout.appendRow(&s.buf, obj, rowIndex, ctx, delimRune); err != nil {
+				return err
 			}
 		}
 		return nil
@@ -392,7 +387,7 @@ func (s *encodeState) encodeKeyedObject(obj Object, keyLiteral string, depth int
 		}
 		entries[i] = entry
 	}
-	fields, ok := detectTabular(entries)
+	layout, ok := compileTabularLayout(entries)
 	if !ok {
 		return false, nil
 	}
@@ -401,10 +396,16 @@ func (s *encodeState) encodeKeyedObject(obj Object, keyLiteral string, depth int
 	if listItem {
 		s.buf.WriteString("- ")
 	}
-	s.buf.appendKeyedHeader(keyLiteral, len(entries), s.cfg.delimiter, fields)
+	s.buf.appendKeyedHeader(keyLiteral, len(entries), s.cfg.delimiter, layout.fields)
 	rowDepth := depth + 1
 	if listItem {
 		rowDepth++
+	}
+	delimRune := s.cfg.delimiter.rune()
+	elemCtx := formatContext{
+		active:   s.cfg.delimiter,
+		document: s.cfg.delimiter,
+		inArray:  true,
 	}
 	for i, field := range obj.Fields {
 		entryKey, err := encodeKey(field.Key)
@@ -416,19 +417,8 @@ func (s *encodeState) encodeKeyedObject(obj Object, keyLiteral string, depth int
 		s.writeIndent(rowDepth)
 		s.buf.WriteString(entryKey)
 		s.buf.WriteString(": ")
-		delimRune := s.cfg.delimiter.rune()
-		elemCtx := formatContext{
-			active:   s.cfg.delimiter,
-			document: s.cfg.delimiter,
-			inArray:  true,
-		}
-		for j, value := range flattenObjectValues(entry, fields) {
-			if j > 0 {
-				s.buf.WriteRune(delimRune)
-			}
-			if err := s.buf.appendPrimitive(value, elemCtx); err != nil {
-				return false, err
-			}
+		if err := layout.appendRow(&s.buf, entry, i, elemCtx, delimRune); err != nil {
+			return false, err
 		}
 	}
 	return true, nil
@@ -441,23 +431,18 @@ func (s *encodeState) encodeArrayForObjectListItem(keyLiteral string, values []n
 	// when their elements happen to be tabular-shaped. A fields-bearing
 	// header here would change the required §10 layout.
 	if keyLiteral != "" {
-		if fields, ok := detectTabular(values); ok {
+		if layout, ok := compileTabularLayout(values); ok {
 			s.startLine()
 			s.writeIndent(depth)
 			s.buf.WriteString("- ")
-			s.buf.appendHeader(keyLiteral, len(values), delimiter, fields)
+			s.buf.appendHeader(keyLiteral, len(values), delimiter, layout.fields)
 			delimRune := delimiter.rune()
-			for _, row := range values {
+			for rowIndex, row := range values {
 				obj := row.(Object)
 				s.startLine()
 				s.writeIndent(depth + 2)
-				for i, field := range flattenObjectValues(obj, fields) {
-					if i > 0 {
-						s.buf.WriteRune(delimRune)
-					}
-					if err := s.buf.appendPrimitive(field, ctx); err != nil {
-						return err
-					}
+				if err := layout.appendRow(&s.buf, obj, rowIndex, ctx, delimRune); err != nil {
+					return err
 				}
 			}
 			return nil
@@ -691,18 +676,86 @@ func (l *tabularLayout) validateRow(obj Object) ([]int, bool) {
 	return mapping, true
 }
 
-func flattenObjectValues(obj Object, fields []fieldNode) []normalizedValue {
-	values := make([]normalizedValue, 0)
-	for _, field := range fields {
-		value := objField(obj, field.name)
-		if len(field.children) == 0 {
-			values = append(values, value)
-			continue
-		}
-		nested, _ := value.(Object)
-		values = append(values, flattenObjectValues(nested, field.children)...)
+func (l *tabularLayout) appendRow(b *encBuffer, obj Object, rowIndex int, ctx formatContext, delimRune rune) error {
+	var mapping []int
+	if l.rowMappings != nil && rowIndex < len(l.rowMappings) {
+		mapping = l.rowMappings[rowIndex]
 	}
-	return values
+	_, err := l.appendColumns(b, obj, mapping, ctx, delimRune, true)
+	return err
+}
+
+func (l *tabularLayout) appendColumns(b *encBuffer, obj Object, mapping []int, ctx formatContext, delimRune rune, isFirst bool) (bool, error) {
+	n := len(l.columns)
+	for colIdx := 0; colIdx < n; colIdx++ {
+		col := &l.columns[colIdx]
+		var val normalizedValue
+		if mapping == nil {
+			if colIdx >= len(obj.Fields) || obj.Fields[colIdx].Key != col.name {
+				return isFirst, fmt.Errorf("toon: field %q not found in row", col.name)
+			}
+			val = obj.Fields[colIdx].Value
+		} else {
+			if colIdx >= len(mapping) {
+				return isFirst, fmt.Errorf("toon: column index %d out of mapping bounds", colIdx)
+			}
+			fieldIdx := mapping[colIdx]
+			if fieldIdx < 0 || fieldIdx >= len(obj.Fields) || obj.Fields[fieldIdx].Key != col.name {
+				return isFirst, fmt.Errorf("toon: field %q not found in row via mapping", col.name)
+			}
+			val = obj.Fields[fieldIdx].Value
+		}
+
+		if !col.isNested {
+			if !isFirst {
+				b.WriteRune(delimRune)
+			}
+			isFirst = false
+			if err := b.appendPrimitive(val, ctx); err != nil {
+				return isFirst, err
+			}
+		} else {
+			childObj, ok := val.(Object)
+			if !ok {
+				return isFirst, fmt.Errorf("toon: expected nested object for field %q, got %T", col.name, val)
+			}
+			var childMapping []int
+			childN := len(col.childLayout.columns)
+			if len(childObj.Fields) != childN {
+				return isFirst, fmt.Errorf("toon: nested object %q has %d fields, want %d", col.name, len(childObj.Fields), childN)
+			}
+			childStable := true
+			for ci := 0; ci < childN; ci++ {
+				if childObj.Fields[ci].Key != col.childLayout.columns[ci].name {
+					childStable = false
+					break
+				}
+			}
+			if !childStable {
+				childMapping = make([]int, childN)
+				for ci := 0; ci < childN; ci++ {
+					targetKey := col.childLayout.columns[ci].name
+					found := -1
+					for fj, f := range childObj.Fields {
+						if f.Key == targetKey {
+							found = fj
+							break
+						}
+					}
+					if found < 0 {
+						return isFirst, fmt.Errorf("toon: field %q not found in nested object %q", targetKey, col.name)
+					}
+					childMapping[ci] = found
+				}
+			}
+			var err error
+			isFirst, err = col.childLayout.appendColumns(b, childObj, childMapping, ctx, delimRune, isFirst)
+			if err != nil {
+				return isFirst, err
+			}
+		}
+	}
+	return isFirst, nil
 }
 
 func objField(obj Object, key string) normalizedValue {

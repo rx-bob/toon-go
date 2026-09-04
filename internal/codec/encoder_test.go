@@ -617,3 +617,204 @@ func TestTabularLayoutAllocsScaling(t *testing.T) {
 		t.Errorf("detectTabular(1000 rows) allocated %f times, expected <= 10 (no per-row map or slice)", allocs)
 	}
 }
+
+func TestTabularStreamEncoding(t *testing.T) {
+	t.Run("flat_objects", func(t *testing.T) {
+		val := []map[string]any{
+			{"id": 1, "name": "Alice"},
+			{"id": 2, "name": "Bob"},
+		}
+		got, err := Marshal(val)
+		if err != nil {
+			t.Fatalf("Marshal failed: %v", err)
+		}
+		want := "[2]{id,name}:\n  1,Alice\n  2,Bob"
+		if string(got) != want {
+			t.Errorf("got:\n%s\nwant:\n%s", string(got), want)
+		}
+	})
+
+	t.Run("nested_objects", func(t *testing.T) {
+		val := []map[string]any{
+			{"id": 1, "meta": map[string]any{"x": 10, "y": 20}},
+			{"id": 2, "meta": map[string]any{"x": 30, "y": 40}},
+		}
+		got, err := Marshal(val)
+		if err != nil {
+			t.Fatalf("Marshal failed: %v", err)
+		}
+		want := "[2]{id,meta{x,y}}:\n  1,10,20\n  2,30,40"
+		if string(got) != want {
+			t.Errorf("got:\n%s\nwant:\n%s", string(got), want)
+		}
+	})
+
+	t.Run("reordered_row_fields", func(t *testing.T) {
+		cfg := defaultEncoderOptions()
+		norm1, err := normalize(map[string]any{"a": 1, "b": "first"}, cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		norm2, err := normalize(map[string]any{"b": "second", "a": 2}, cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// ensure norm2 has keys in reversed order
+		obj2 := norm2.(Object)
+		if len(obj2.Fields) == 2 && obj2.Fields[0].Key == "a" {
+			obj2.Fields[0], obj2.Fields[1] = obj2.Fields[1], obj2.Fields[0]
+		}
+		val := []normalizedValue{norm1, obj2}
+		got, err := Marshal(val)
+		if err != nil {
+			t.Fatalf("Marshal failed: %v", err)
+		}
+		want := "[2]{a,b}:\n  1,first\n  2,second"
+		if string(got) != want {
+			t.Errorf("got:\n%s\nwant:\n%s", string(got), want)
+		}
+	})
+
+	t.Run("multi_level_nested", func(t *testing.T) {
+		val := []map[string]any{
+			{"a": 1, "b": map[string]any{"c": map[string]any{"d": "v1"}}},
+			{"a": 2, "b": map[string]any{"c": map[string]any{"d": "v2"}}},
+		}
+		got, err := Marshal(val)
+		if err != nil {
+			t.Fatalf("Marshal failed: %v", err)
+		}
+		want := "[2]{a,b{c{d}}}:\n  1,v1\n  2,v2"
+		if string(got) != want {
+			t.Errorf("got:\n%s\nwant:\n%s", string(got), want)
+		}
+	})
+
+	t.Run("keyed_object_tabular", func(t *testing.T) {
+		val := map[string]any{
+			"users": []map[string]any{
+				{"id": 1, "name": "Ada"},
+				{"id": 2, "name": "Alan"},
+			},
+		}
+		got, err := Marshal(val)
+		if err != nil {
+			t.Fatalf("Marshal failed: %v", err)
+		}
+		want := "users[2]{id,name}:\n  1,Ada\n  2,Alan"
+		if string(got) != want {
+			t.Errorf("got:\n%s\nwant:\n%s", string(got), want)
+		}
+	})
+}
+
+func TestTabularMissingFieldInternalError(t *testing.T) {
+	cfg := defaultEncoderOptions()
+	norm, err := normalize([]map[string]any{{"a": 1, "b": 2}}, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := norm.([]normalizedValue)
+	layout, ok := compileTabularLayout(rows)
+	if !ok {
+		t.Fatal("expected layout compilation to succeed")
+	}
+
+	ctx := formatContext{active: DelimiterComma, document: DelimiterComma, inArray: true}
+	var buf encBuffer
+
+	// Row missing field "b"
+	brokenNorm, err := normalize(map[string]any{"a": 10}, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = layout.appendRow(&buf, brokenNorm.(Object), 0, ctx, ',')
+	if err == nil {
+		t.Fatal("expected error for missing field, got nil")
+	}
+	if !strings.Contains(err.Error(), `toon: field "b" not found in row`) {
+		t.Errorf("unexpected error message: %v", err)
+	}
+
+	// Corrupted nested row
+	nestedNorm, err := normalize([]map[string]any{{"meta": map[string]any{"x": 1}}}, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nestedLayout, ok := compileTabularLayout(nestedNorm.([]normalizedValue))
+	if !ok {
+		t.Fatal("expected nested layout compilation to succeed")
+	}
+	brokenNestedNorm, err := normalize(map[string]any{"meta": "not-an-object"}, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = nestedLayout.appendRow(&buf, brokenNestedNorm.(Object), 0, ctx, ',')
+	if err == nil {
+		t.Fatal("expected error for non-object nested field, got nil")
+	}
+	if !strings.Contains(err.Error(), "expected nested object") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
+func TestTabularRowStreamingAllocationScaling(t *testing.T) {
+	cfg := defaultEncoderOptions()
+	payload100 := generateTabularPayload(100)
+	norm100, err := normalize(payload100.Users, cfg)
+	if err != nil {
+		t.Fatalf("normalize failed: %v", err)
+	}
+	rows100 := norm100.([]normalizedValue)
+
+	payload1000 := generateTabularPayload(1000)
+	norm1000, err := normalize(payload1000.Users, cfg)
+	if err != nil {
+		t.Fatalf("normalize failed: %v", err)
+	}
+	rows1000 := norm1000.([]normalizedValue)
+
+	layout100, ok := compileTabularLayout(rows100)
+	if !ok {
+		t.Fatal("expected layout100 compile to succeed")
+	}
+	layout1000, ok := compileTabularLayout(rows1000)
+	if !ok {
+		t.Fatal("expected layout1000 compile to succeed")
+	}
+
+	ctx := formatContext{active: DelimiterComma, document: DelimiterComma, inArray: true}
+	delim := DelimiterComma.rune()
+
+	var buf100 encBuffer
+	buf100.Grow(100 * 256)
+	var buf1000 encBuffer
+	buf1000.Grow(1000 * 256)
+
+	allocs100 := testing.AllocsPerRun(20, func() {
+		buf100.Reset()
+		for i, r := range rows100 {
+			if err := layout100.appendRow(&buf100, r.(Object), i, ctx, delim); err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+
+	allocs1000 := testing.AllocsPerRun(20, func() {
+		buf1000.Reset()
+		for i, r := range rows1000 {
+			if err := layout1000.appendRow(&buf1000, r.(Object), i, ctx, delim); err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+
+	// Zero per-row allocations
+	if allocs100 != 0 {
+		t.Errorf("100 rows streaming allocated %f times, want 0", allocs100)
+	}
+	if allocs1000 != 0 {
+		t.Errorf("1000 rows streaming allocated %f times, want 0", allocs1000)
+	}
+}
+

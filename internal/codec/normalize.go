@@ -31,6 +31,8 @@ func normalize(v any, cfg encoderOptions) (normalizedValue, error) {
 	}
 
 	switch val := v.(type) {
+	case numberValue:
+		return val, nil
 	case string:
 		return val, nil
 	case bool:
