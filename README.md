@@ -12,13 +12,22 @@ Measured on Apple M1 with synthetic TOON workloads; results vary by CPU and docu
 
 | Path | Before | Now | Gain |
 |---|---:|---:|---:|
-| Tabular marshal, 1k rows | 2.01 ms | 1.96 ms | ~3% faster |
+| Tabular marshal, 1k rows | 2.01 ms | 880 µs | **2.28× faster** |
 | Tabular unmarshal, 1k rows | 3.21 ms | 1.66 ms | **1.93× faster** |
 | Inline split, 1k clean fields | 147 µs | 16.9 µs | **8.7× faster** |
 | `NeedsQuoting`, clean 500B | 602 ns | 57 ns | **10.5× faster** |
 | Scan 10k LF lines | 518 µs | 204 µs | **2.5× faster** |
 
-Tabular decoding allocations dropped from 38,885 to 15,084 per operation (~61%).
+### 1,000-Row Tabular Workload Breakdown
+
+| Metric | Before | Now | Delta |
+|---|---:|---:|---:|
+| **Marshal Latency** | 1.97 ms | 0.88 ms | **2.24× faster** (sub-millisecond) |
+| **Marshal Throughput** | 102 MB/s | 229 MB/s | **+124%** |
+| **Marshal Allocations** | 26,872 allocs/op | 6 allocs/op | **-99.98%** (4,478× fewer) |
+| **Marshal Memory** | 1,250 KB/op | 254 KB/op | **-79.7%** |
+| **Unmarshal Latency** | 3.21 ms | 1.66 ms | **1.93× faster** |
+| **Unmarshal Allocations** | 38,885 allocs/op | 15,084 allocs/op | **-61.2%** |
 
 This implementation targets `toon-spec: 4.1` and is tested against the
 official specification and fixture revision `v4.1.1` (submodule commit
