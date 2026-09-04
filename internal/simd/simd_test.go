@@ -907,6 +907,22 @@ func BenchmarkCharacterClassification(b *testing.B) {
 				_ = HasEscapeOrControlAVX2(clean)
 			}
 		})
+
+		b.Run(fmt.Sprintf("NeedsQuoting_NEON_%dB", size), func(b *testing.B) {
+			b.SetBytes(int64(size))
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				_ = NeedsQuotingNEON(clean, ',')
+			}
+		})
+
+		b.Run(fmt.Sprintf("HasEscapeOrControl_NEON_%dB", size), func(b *testing.B) {
+			b.SetBytes(int64(size))
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				_ = HasEscapeOrControlNEON(clean)
+			}
+		})
 	}
 }
 
@@ -1063,6 +1079,198 @@ func TestAVX2_Classifier_DifferentialAgainstFormatNeedsQuoting(t *testing.T) {
 		// When AVX2 detects special/control/delim bytes, format.NeedsQuoting MUST be true
 		if gotAVX2 && !wantQuoting {
 			t.Fatalf("input %q (delim %q): NeedsQuotingAVX2 is true but format.NeedsQuoting is false", tc.input, tc.delim)
+		}
+	}
+}
+
+func TestNEON_Classifier_FallbackOnSimulatedDisabled(t *testing.T) {
+	restore := SetCPUFeaturesForTest(CPUFeatures{HasAVX2: false, HasBMI2: false, HasNEON: false})
+	defer restore()
+
+	inputs := []string{
+		"plain_simple_text",
+		"users[2]{id,name}:",
+		"line\nbreak",
+		"tab\tseparated",
+		`escaped\"quote`,
+		"unicode: 你好世界 🚀",
+	}
+
+	for _, s := range inputs {
+		data := []byte(s)
+
+		gotEsc := HasEscapeOrControlNEON(data)
+		wantEsc := HasEscapeOrControlSWAR(data)
+		if gotEsc != wantEsc {
+			t.Fatalf("input %q: HasEscapeOrControlNEON = %v, want %v", s, gotEsc, wantEsc)
+		}
+
+		gotEscIdx := IndexEscapeOrControlNEON(data)
+		wantEscIdx := IndexEscapeOrControlSWAR(data)
+		if gotEscIdx != wantEscIdx {
+			t.Fatalf("input %q: IndexEscapeOrControlNEON = %d, want %d", s, gotEscIdx, wantEscIdx)
+		}
+
+		gotSpec := HasSpecialOrControlNEON(data, ',')
+		wantSpec := HasSpecialOrControlSWAR(data, ',')
+		if gotSpec != wantSpec {
+			t.Fatalf("input %q: HasSpecialOrControlNEON = %v, want %v", s, gotSpec, wantSpec)
+		}
+
+		gotSpecIdx := IndexSpecialOrControlNEON(data, ',')
+		wantSpecIdx := IndexSpecialOrControlSWAR(data, ',')
+		if gotSpecIdx != wantSpecIdx {
+			t.Fatalf("input %q: IndexSpecialOrControlNEON = %d, want %d", s, gotSpecIdx, wantSpecIdx)
+		}
+	}
+}
+
+func TestNEON_Classifier_WideCharacterCorpora(t *testing.T) {
+	corpora := []string{
+		// English plain
+		"alphaNumericValue12345_Test_Identifier_Here",
+		// Latin extended
+		"Les naïfs méritent des récompenses pour leur créativité",
+		// Cyrillic
+		"Быстрая бурая лисица прыгает через ленивую собаку",
+		// CJK
+		"春眠不觉晓，处处闻啼鸟。夜来风雨声，花落知多少。",
+		// Japanese Kana & Kanji
+		"いろはにほへと ちりぬるを わかよたれそ つねならむ",
+		// Korean Hangul
+		"다람쥐 헌 쳇바퀴에 타고파. 무궁화 꽃이 피었습니다.",
+		// Greek
+		"Ξεσκεπάζω την ψυχοφθόρα βδελυγμία του καθωσπρεπισμού.",
+		// Arabic
+		"نص حكيم له سر قاطع وذو شأن عظيم مكتوب على ثوب أخضر ومذهب",
+		// Emojis & Symbols
+		"🚀✨🎉🔥🤖💡📦🛠️⚡💻🎯🏆",
+		// Long text spanning multiple 16-byte chunks (> 100 bytes)
+		"The quick brown fox jumps over the lazy dog. A large continuous text block designed to span multiple vector chunks.",
+	}
+
+	delims := []byte{',', '\t', '|', ';', 0}
+
+	for _, text := range corpora {
+		data := []byte(text)
+
+		if HasEscapeOrControlNEON(data) != HasEscapeOrControlScalar(data) {
+			t.Fatalf("corpora %q: HasEscapeOrControlNEON mismatch", text)
+		}
+		if HasSpecialOrControlNEON(data, 0) != HasSpecialOrControlScalar(data, 0) {
+			t.Fatalf("corpora %q: HasSpecialOrControlNEON mismatch with delim 0", text)
+		}
+
+		// Inject special characters into every position of the corpora
+		specials := []byte{':', '\\', '"', '[', ']', '{', '}', '\n', '\r', '\t', '\x00'}
+		for _, sp := range specials {
+			for pos := 0; pos <= len(data); pos++ {
+				modified := make([]byte, 0, len(data)+1)
+				modified = append(modified, data[:pos]...)
+				modified = append(modified, sp)
+				modified = append(modified, data[pos:]...)
+
+				for _, delim := range delims {
+					wantSpecial := HasSpecialOrControlScalar(modified, delim)
+					gotSpecial := HasSpecialOrControlNEON(modified, delim)
+					if wantSpecial != gotSpecial {
+						t.Fatalf("modified corpora (%q at pos %d, delim %q): got %v, want %v", sp, pos, delim, gotSpecial, wantSpecial)
+					}
+
+					wantSpecialIdx := IndexSpecialOrControlScalar(modified, delim)
+					gotSpecialIdx := IndexSpecialOrControlNEON(modified, delim)
+					if wantSpecialIdx != gotSpecialIdx {
+						t.Fatalf("modified corpora (%q at pos %d, delim %q) index: got %d, want %d", sp, pos, delim, gotSpecialIdx, wantSpecialIdx)
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestNEON_Classifier_DifferentialAgainstFormatNeedsQuoting(t *testing.T) {
+	testCases := []struct {
+		input string
+		delim byte
+	}{
+		{"normal", ','},
+		{"normal_value", ','},
+		{"with,comma", ','},
+		{"with:colon", ','},
+		{"with\\slash", ','},
+		{"with\"quote", ','},
+		{"with[bracket", ','},
+		{"with]bracket", ','},
+		{"with{brace", ','},
+		{"with}brace", ','},
+		{"with\nnewline", ','},
+		{"with\rcarriage", ','},
+		{"with\ttab", ','},
+		{"with\x01control", ','},
+		{"with|pipe", '|'},
+		{"with;semi", ';'},
+		{"long_clean_string_more_than_thirty_two_bytes_length", ','},
+		{"long_string_with_a_colon:inside_it_beyond_32_bytes", ','},
+		{"multibyte_chinese_世界_clean", ','},
+		{"multibyte_chinese_世界:has_colon", ','},
+		{"emoji_clean_🚀🌟", ','},
+		{"emoji_has_quote_🚀\"🌟", ','},
+	}
+
+	for _, tc := range testCases {
+		data := []byte(tc.input)
+		ctx := format.Context{InArray: true, Active: rune(tc.delim)}
+
+		gotNEON := NeedsQuotingNEON(data, tc.delim)
+		gotSWAR := NeedsQuotingSWAR(data, tc.delim)
+		gotScalar := NeedsQuotingScalar(data, tc.delim)
+		wantQuoting := format.NeedsQuoting(tc.input, ctx)
+
+		if gotNEON != gotSWAR || gotNEON != gotScalar {
+			t.Fatalf("input %q (delim %q): NEON=%v, SWAR=%v, Scalar=%v", tc.input, tc.delim, gotNEON, gotSWAR, gotScalar)
+		}
+
+		if gotNEON && !wantQuoting {
+			t.Fatalf("input %q (delim %q): NeedsQuotingNEON is true but format.NeedsQuoting is false", tc.input, tc.delim)
+		}
+	}
+}
+
+func TestNEON_Classifier_DifferentialAgainstSWAR_10000Rows(t *testing.T) {
+	rng := rand.New(rand.NewSource(42))
+	delims := []byte{',', '\t', '|', ';', ':'}
+	charset := []byte("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-. :/\\\"[]{} \t\r\n\x00\x01\x1F\x7F世é🚀")
+
+	for rowIdx := 0; rowIdx < 10000; rowIdx++ {
+		length := rng.Intn(100)
+		buf := make([]byte, length)
+		for i := range buf {
+			buf[i] = charset[rng.Intn(len(charset))]
+		}
+		delim := delims[rng.Intn(len(delims))]
+
+		gotEsc := HasEscapeOrControlNEON(buf)
+		wantEsc := HasEscapeOrControlSWAR(buf)
+		if gotEsc != wantEsc {
+			t.Fatalf("row %d: HasEscapeOrControl mismatch: NEON=%v, SWAR=%v, buf=%q", rowIdx, gotEsc, wantEsc, buf)
+		}
+
+		gotEscIdx := IndexEscapeOrControlNEON(buf)
+		wantEscIdx := IndexEscapeOrControlSWAR(buf)
+		if gotEscIdx != wantEscIdx {
+			t.Fatalf("row %d: IndexEscapeOrControl mismatch: NEON=%d, SWAR=%d, buf=%q", rowIdx, gotEscIdx, wantEscIdx, buf)
+		}
+
+		gotSpec := HasSpecialOrControlNEON(buf, delim)
+		wantSpec := HasSpecialOrControlSWAR(buf, delim)
+		if gotSpec != wantSpec {
+			t.Fatalf("row %d: HasSpecialOrControl mismatch: NEON=%v, SWAR=%v, delim=%q, buf=%q", rowIdx, gotSpec, wantSpec, delim, buf)
+		}
+
+		gotSpecIdx := IndexSpecialOrControlNEON(buf, delim)
+		wantSpecIdx := IndexSpecialOrControlSWAR(buf, delim)
+		if gotSpecIdx != wantSpecIdx {
+			t.Fatalf("row %d: IndexSpecialOrControl mismatch: NEON=%d, SWAR=%d, delim=%q, buf=%q", rowIdx, gotSpecIdx, wantSpecIdx, delim, buf)
 		}
 	}
 }

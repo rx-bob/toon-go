@@ -118,6 +118,9 @@ func HasEscapeOrControlAuto(data []byte) bool {
 	if HasAVX2() && HasBMI2() {
 		return HasEscapeOrControlAVX2(data)
 	}
+	if HasNEON() {
+		return HasEscapeOrControlNEON(data)
+	}
 	return HasEscapeOrControlSWAR(data)
 }
 
@@ -126,6 +129,9 @@ func HasEscapeOrControlAuto(data []byte) bool {
 func IndexEscapeOrControlAuto(data []byte) int {
 	if HasAVX2() && HasBMI2() {
 		return IndexEscapeOrControlAVX2(data)
+	}
+	if HasNEON() {
+		return IndexEscapeOrControlNEON(data)
 	}
 	return IndexEscapeOrControlSWAR(data)
 }
@@ -136,6 +142,9 @@ func HasSpecialOrControlAuto(data []byte, delim byte) bool {
 	if HasAVX2() && HasBMI2() {
 		return HasSpecialOrControlAVX2(data, delim)
 	}
+	if HasNEON() {
+		return HasSpecialOrControlNEON(data, delim)
+	}
 	return HasSpecialOrControlSWAR(data, delim)
 }
 
@@ -144,6 +153,9 @@ func HasSpecialOrControlAuto(data []byte, delim byte) bool {
 func IndexSpecialOrControlAuto(data []byte, delim byte) int {
 	if HasAVX2() && HasBMI2() {
 		return IndexSpecialOrControlAVX2(data, delim)
+	}
+	if HasNEON() {
+		return IndexSpecialOrControlNEON(data, delim)
 	}
 	return IndexSpecialOrControlSWAR(data, delim)
 }

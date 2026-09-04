@@ -26,3 +26,28 @@ func IndexSpecialOrControlAVX2(data []byte, delim byte) int {
 func NeedsQuotingAVX2(data []byte, delim byte) bool {
 	return HasSpecialOrControlSWAR(data, delim)
 }
+
+// HasEscapeOrControlNEON falls back to SWAR on non-arm64 architectures or purego mode.
+func HasEscapeOrControlNEON(data []byte) bool {
+	return HasEscapeOrControlSWAR(data)
+}
+
+// IndexEscapeOrControlNEON falls back to SWAR on non-arm64 architectures or purego mode.
+func IndexEscapeOrControlNEON(data []byte) int {
+	return IndexEscapeOrControlSWAR(data)
+}
+
+// HasSpecialOrControlNEON falls back to SWAR on non-arm64 architectures or purego mode.
+func HasSpecialOrControlNEON(data []byte, delim byte) bool {
+	return HasSpecialOrControlSWAR(data, delim)
+}
+
+// IndexSpecialOrControlNEON falls back to SWAR on non-arm64 architectures or purego mode.
+func IndexSpecialOrControlNEON(data []byte, delim byte) int {
+	return IndexSpecialOrControlSWAR(data, delim)
+}
+
+// NeedsQuotingNEON falls back to SWAR on non-arm64 architectures or purego mode.
+func NeedsQuotingNEON(data []byte, delim byte) bool {
+	return HasSpecialOrControlSWAR(data, delim)
+}
