@@ -14,9 +14,17 @@ type structFieldMeta struct {
 }
 
 type structMeta struct {
-	fields []structFieldMeta
-	lookup map[string]structFieldMeta
-	err    error
+	fields       []structFieldMeta
+	lookup       map[string]structFieldMeta
+	err          error
+	tabularPlans map[Delimiter]*tabularRowPlan
+}
+
+func (m structMeta) tabularPlan(delim Delimiter) *tabularRowPlan {
+	if m.tabularPlans != nil {
+		return m.tabularPlans[delim]
+	}
+	return nil
 }
 
 var structCache sync.Map // map[reflect.Type]structMeta
@@ -52,16 +60,20 @@ func buildStructMeta(t reflect.Type) structMeta {
 			index:     sf.Index,
 		}
 		if _, exists := lookup[name]; exists {
-			return structMeta{
+			sm := structMeta{
 				fields: fields,
 				lookup: lookup,
 				err:    fmt.Errorf("duplicate struct field name %q", name),
 			}
+			sm.tabularPlans = buildTabularPlansForStruct(t, sm)
+			return sm
 		}
 		fields = append(fields, meta)
 		lookup[name] = meta
 	}
-	return structMeta{fields: fields, lookup: lookup}
+	sm := structMeta{fields: fields, lookup: lookup}
+	sm.tabularPlans = buildTabularPlansForStruct(t, sm)
+	return sm
 }
 
 func parseStructTag(tag string) (string, map[string]bool) {

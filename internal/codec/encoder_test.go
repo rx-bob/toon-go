@@ -4,8 +4,12 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"reflect"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestEncoderBufferPrimitives(t *testing.T) {
@@ -816,5 +820,316 @@ func TestTabularRowStreamingAllocationScaling(t *testing.T) {
 	if allocs1000 != 0 {
 		t.Errorf("1000 rows streaming allocated %f times, want 0", allocs1000)
 	}
+}
+
+type (
+	testAliasInt    int
+	testAliasString string
+	testAliasBool   bool
+	testAliasFloat  float32
+
+	testValueStringer int
+	testPtrStringer   int
+)
+
+func (v testValueStringer) String() string {
+	return fmt.Sprintf("val:%d", v)
+}
+
+func (p *testPtrStringer) String() string {
+	return fmt.Sprintf("ptr:%d", *p)
+}
+
+type (
+	testRowAliases struct {
+		I testAliasInt    `toon:"i"`
+		S testAliasString `toon:"s"`
+		B testAliasBool   `toon:"b"`
+		F testAliasFloat  `toon:"f"`
+	}
+
+	testRowIntWidths struct {
+		I8  int8   `toon:"i8"`
+		I16 int16  `toon:"i16"`
+		I32 int32  `toon:"i32"`
+		I64 int64  `toon:"i64"`
+		I   int    `toon:"i"`
+		U8  uint8  `toon:"u8"`
+		U16 uint16 `toon:"u16"`
+		U32 uint32 `toon:"u32"`
+		U64 uint64 `toon:"u64"`
+		U   uint   `toon:"u"`
+	}
+
+	testRowFloatWidths struct {
+		F32 float32 `toon:"f32"`
+		F64 float64 `toon:"f64"`
+	}
+
+	testRowIgnoredFields struct {
+		A       int    `toon:"a"`
+		Ignored string `toon:"-"`
+		B       string `toon:"b"`
+	}
+
+	testRowUnexported struct {
+		A          int `toon:"a"`
+		unexported int
+		B          string `toon:"b"`
+	}
+
+	testRowDuplicateTags struct {
+		A1 int `toon:"x"`
+		A2 int `toon:"x"`
+	}
+
+	testRowPointerField struct {
+		A int  `toon:"a"`
+		P *int `toon:"p"`
+	}
+
+	testRowOmitempty struct {
+		A int `toon:"a,omitempty"`
+		B int `toon:"b"`
+	}
+
+	testRowNestedStruct struct {
+		A      int `toon:"a"`
+		Nested struct {
+			X int `toon:"x"`
+		} `toon:"nested"`
+	}
+
+	testRowValueStringer struct {
+		A int               `toon:"a"`
+		S testValueStringer `toon:"s"`
+	}
+
+	testRowPtrStringer struct {
+		A int             `toon:"a"`
+		S testPtrStringer `toon:"s"`
+	}
+
+	testRowTime struct {
+		A int       `toon:"a"`
+		T time.Time `toon:"t"`
+	}
+
+	testRowEmpty struct{}
+)
+
+func TestTabularRowPlanCompilation(t *testing.T) {
+	t.Run("benchmark_row_eligibility", func(t *testing.T) {
+		plan := cachedTabularRowPlan(reflect.TypeOf(BenchmarkRow{}), DelimiterComma)
+		if !plan.IsEligible() {
+			t.Fatalf("expected BenchmarkRow to be eligible, got ineligible: %s", plan.Reason())
+		}
+		if len(plan.fields) != 11 {
+			t.Fatalf("expected 11 fields, got %d", len(plan.fields))
+		}
+
+		expectedOrder := []string{"id", "name", "email", "active", "score", "role", "dept", "city", "age", "rating", "bio"}
+		for i, exp := range expectedOrder {
+			if plan.fields[i].name != exp {
+				t.Errorf("field %d: expected name %q, got %q", i, exp, plan.fields[i].name)
+			}
+			if plan.fields[i].flatIndex != i {
+				t.Errorf("field %d: expected flatIndex %d, got %d", i, i, plan.fields[i].flatIndex)
+			}
+		}
+
+		if plan.fields[0].op != opInt {
+			t.Errorf("ID op: got %v, want opInt", plan.fields[0].op)
+		}
+		if plan.fields[1].op != opString {
+			t.Errorf("Name op: got %v, want opString", plan.fields[1].op)
+		}
+		if plan.fields[3].op != opBool {
+			t.Errorf("Active op: got %v, want opBool", plan.fields[3].op)
+		}
+		if plan.fields[4].op != opFloat64 || plan.fields[4].bitWidth != 64 {
+			t.Errorf("Score op: got %v (bitwidth %d), want opFloat64 64", plan.fields[4].op, plan.fields[4].bitWidth)
+		}
+
+		wantHeader := "{id,name,email,active,score,role,dept,city,age,rating,bio}:"
+		if plan.headerLiteral != wantHeader {
+			t.Errorf("headerLiteral: got %q, want %q", plan.headerLiteral, wantHeader)
+		}
+
+		// Check Tab delimiter precompilation
+		planTab := cachedTabularRowPlan(reflect.TypeOf(BenchmarkRow{}), DelimiterTab)
+		wantTabHeader := "{id\tname\temail\tactive\tscore\trole\tdept\tcity\tage\trating\tbio}:"
+		if planTab.headerLiteral != wantTabHeader {
+			t.Errorf("tab headerLiteral: got %q, want %q", planTab.headerLiteral, wantTabHeader)
+		}
+
+		// Check Pipe delimiter precompilation
+		planPipe := cachedTabularRowPlan(reflect.TypeOf(BenchmarkRow{}), DelimiterPipe)
+		wantPipeHeader := "{id|name|email|active|score|role|dept|city|age|rating|bio}:"
+		if planPipe.headerLiteral != wantPipeHeader {
+			t.Errorf("pipe headerLiteral: got %q, want %q", planPipe.headerLiteral, wantPipeHeader)
+		}
+	})
+
+	t.Run("aliases", func(t *testing.T) {
+		plan := cachedTabularRowPlan(reflect.TypeOf(testRowAliases{}), DelimiterComma)
+		if !plan.IsEligible() {
+			t.Fatalf("expected testRowAliases to be eligible, got ineligible: %s", plan.Reason())
+		}
+		if len(plan.fields) != 4 {
+			t.Fatalf("expected 4 fields, got %d", len(plan.fields))
+		}
+		if plan.fields[0].op != opInt {
+			t.Errorf("alias int op: got %v, want opInt", plan.fields[0].op)
+		}
+		if plan.fields[1].op != opString {
+			t.Errorf("alias string op: got %v, want opString", plan.fields[1].op)
+		}
+		if plan.fields[2].op != opBool {
+			t.Errorf("alias bool op: got %v, want opBool", plan.fields[2].op)
+		}
+		if plan.fields[3].op != opFloat32 || plan.fields[3].bitWidth != 32 {
+			t.Errorf("alias float op: got %v (bitwidth %d), want opFloat32 32", plan.fields[3].op, plan.fields[3].bitWidth)
+		}
+	})
+
+	t.Run("all_integer_widths", func(t *testing.T) {
+		plan := cachedTabularRowPlan(reflect.TypeOf(testRowIntWidths{}), DelimiterComma)
+		if !plan.IsEligible() {
+			t.Fatalf("expected testRowIntWidths to be eligible: %s", plan.Reason())
+		}
+		widths := []int{8, 16, 32, 64, strconv.IntSize, 8, 16, 32, 64, strconv.IntSize}
+		for i, w := range widths {
+			if plan.fields[i].bitWidth != w {
+				t.Errorf("field %s: expected bitWidth %d, got %d", plan.fields[i].name, w, plan.fields[i].bitWidth)
+			}
+			expectedOp := opInt
+			if i >= 5 {
+				expectedOp = opUint
+			}
+			if plan.fields[i].op != expectedOp {
+				t.Errorf("field %s: expected op %v, got %v", plan.fields[i].name, expectedOp, plan.fields[i].op)
+			}
+		}
+	})
+
+	t.Run("float_widths", func(t *testing.T) {
+		plan := cachedTabularRowPlan(reflect.TypeOf(testRowFloatWidths{}), DelimiterComma)
+		if !plan.IsEligible() {
+			t.Fatalf("expected testRowFloatWidths to be eligible: %s", plan.Reason())
+		}
+		if plan.fields[0].op != opFloat32 || plan.fields[0].bitWidth != 32 {
+			t.Errorf("f32: got op %v, width %d", plan.fields[0].op, plan.fields[0].bitWidth)
+		}
+		if plan.fields[1].op != opFloat64 || plan.fields[1].bitWidth != 64 {
+			t.Errorf("f64: got op %v, width %d", plan.fields[1].op, plan.fields[1].bitWidth)
+		}
+	})
+
+	t.Run("ignored_and_unexported_fields", func(t *testing.T) {
+		planIgnored := cachedTabularRowPlan(reflect.TypeOf(testRowIgnoredFields{}), DelimiterComma)
+		if !planIgnored.IsEligible() {
+			t.Fatalf("expected testRowIgnoredFields to be eligible: %s", planIgnored.Reason())
+		}
+		if len(planIgnored.fields) != 2 {
+			t.Fatalf("expected 2 fields (skipping '-'), got %d", len(planIgnored.fields))
+		}
+		if planIgnored.fields[0].name != "a" || planIgnored.fields[1].name != "b" {
+			t.Errorf("unexpected fields: %v", planIgnored.fields)
+		}
+
+		planUnexported := cachedTabularRowPlan(reflect.TypeOf(testRowUnexported{}), DelimiterComma)
+		if !planUnexported.IsEligible() {
+			t.Fatalf("expected testRowUnexported to be eligible: %s", planUnexported.Reason())
+		}
+		if len(planUnexported.fields) != 2 {
+			t.Fatalf("expected 2 fields (skipping unexported), got %d", len(planUnexported.fields))
+		}
+	})
+
+	t.Run("ineligible_cases", func(t *testing.T) {
+		cases := []struct {
+			name string
+			typ  reflect.Type
+			want string
+		}{
+			{"duplicate_tags", reflect.TypeOf(testRowDuplicateTags{}), "duplicate"},
+			{"pointer_field", reflect.TypeOf(testRowPointerField{}), "unsupported type"},
+			{"omitempty", reflect.TypeOf(testRowOmitempty{}), "omitempty"},
+			{"nested_struct", reflect.TypeOf(testRowNestedStruct{}), "unsupported type"},
+			{"value_stringer", reflect.TypeOf(testRowValueStringer{}), "fmt.Stringer"},
+			{"ptr_stringer", reflect.TypeOf(testRowPtrStringer{}), "fmt.Stringer"},
+			{"time_type", reflect.TypeOf(testRowTime{}), "time type"},
+			{"empty_struct", reflect.TypeOf(testRowEmpty{}), "no exported fields"},
+			{"pointer_to_struct", reflect.TypeOf(&BenchmarkRow{}), "unsupported row kind"},
+			{"primitive_type", reflect.TypeOf(42), "unsupported row kind"},
+		}
+
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				plan := cachedTabularRowPlan(tc.typ, DelimiterComma)
+				if plan.IsEligible() {
+					t.Fatalf("expected type %v to be ineligible, but plan was eligible", tc.typ)
+				}
+				if !strings.Contains(plan.Reason(), tc.want) {
+					t.Errorf("reason %q does not contain %q", plan.Reason(), tc.want)
+				}
+			})
+		}
+	})
+
+	t.Run("plan_cache_identity", func(t *testing.T) {
+		typ := reflect.TypeOf(BenchmarkRow{})
+		p1 := cachedTabularRowPlan(typ, DelimiterComma)
+		p2 := cachedTabularRowPlan(typ, DelimiterComma)
+		if p1 != p2 {
+			t.Errorf("expected plan pointer identity, got %p != %p", p1, p2)
+		}
+
+		ineligibleTyp := reflect.TypeOf(testRowPointerField{})
+		ip1 := cachedTabularRowPlan(ineligibleTyp, DelimiterComma)
+		ip2 := cachedTabularRowPlan(ineligibleTyp, DelimiterComma)
+		if ip1 != ip2 {
+			t.Errorf("expected ineligible plan pointer identity, got %p != %p", ip1, ip2)
+		}
+	})
+}
+
+func TestTabularRowPlanConcurrentLookups(t *testing.T) {
+	types := []reflect.Type{
+		reflect.TypeOf(BenchmarkRow{}),
+		reflect.TypeOf(testRowAliases{}),
+		reflect.TypeOf(testRowIntWidths{}),
+		reflect.TypeOf(testRowFloatWidths{}),
+		reflect.TypeOf(testRowIgnoredFields{}),
+		reflect.TypeOf(testRowPointerField{}),
+		reflect.TypeOf(testRowOmitempty{}),
+		reflect.TypeOf(testRowNestedStruct{}),
+		reflect.TypeOf(testRowValueStringer{}),
+		reflect.TypeOf(testRowTime{}),
+	}
+	delims := []Delimiter{DelimiterComma, DelimiterTab, DelimiterPipe}
+
+	const goroutines = 50
+	const iterations = 100
+
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+
+	for g := 0; g < goroutines; g++ {
+		go func(gid int) {
+			defer wg.Done()
+			for i := 0; i < iterations; i++ {
+				typ := types[(gid+i)%len(types)]
+				delim := delims[(gid+i)%len(delims)]
+				plan := cachedTabularRowPlan(typ, delim)
+				if plan == nil {
+					t.Errorf("nil plan returned for %v", typ)
+				}
+			}
+		}(g)
+	}
+
+	wg.Wait()
 }
 
