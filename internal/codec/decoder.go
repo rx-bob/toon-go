@@ -7,10 +7,18 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+	"unsafe"
 
 	formatpkg "github.com/toon-format/toon-go/internal/format"
 	parsepkg "github.com/toon-format/toon-go/internal/parse"
 )
+
+func bytesToString(b []byte) string {
+	if len(b) == 0 {
+		return ""
+	}
+	return unsafe.String(unsafe.SliceData(b), len(b))
+}
 
 // Decoder parses TOON documents into Go values that match the data model from
 // Section 2. Numbers are returned as float64, objects as map[string]any, and
@@ -33,7 +41,7 @@ func (d *Decoder) Decode(data []byte) (any, error) {
 	if d.cfg.strict && !utf8.Valid(data) {
 		return nil, errorAt(invalidUTF8Line(data), "input is not valid UTF-8")
 	}
-	parser, err := newParser(string(data), d.cfg)
+	parser, err := newParser(bytesToString(data), d.cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -48,7 +56,7 @@ func (d *Decoder) decodeForUnmarshal(data []byte) (any, error) {
 	if d.cfg.strict && !utf8.Valid(data) {
 		return nil, errorAt(invalidUTF8Line(data), "input is not valid UTF-8")
 	}
-	parser, err := newParser(string(data), d.cfg)
+	parser, err := newParser(bytesToString(data), d.cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -119,7 +127,6 @@ type parsedLine struct {
 	number  int
 	indent  int
 	content string
-	raw     string
 	blank   bool
 }
 
@@ -138,7 +145,6 @@ func newParser(input string, cfg decoderOptions) (*parser, error) {
 			number:  scanned.number,
 			indent:  indent,
 			content: content,
-			raw:     scanned.text,
 			blank:   content == "",
 		})
 	}
@@ -174,7 +180,7 @@ func scanLines(input string) []scannedLine {
 	if strings.HasPrefix(input, "\ufeff") {
 		input = input[len("\ufeff"):]
 	}
-	lines := make([]scannedLine, 0)
+	lines := make([]scannedLine, 0, strings.Count(input, "\n")+1)
 	start, number := 0, 1
 	for i := 0; i < len(input); i++ {
 		if input[i] != '\n' && input[i] != '\r' {
@@ -194,7 +200,9 @@ func scanLines(input string) []scannedLine {
 }
 
 func makeScannedLine(number int, line string) scannedLine {
-	line = strings.TrimRight(line, " ")
+	for len(line) > 0 && line[len(line)-1] == ' ' {
+		line = line[:len(line)-1]
+	}
 	comment := false
 	for i := 0; i < len(line); i++ {
 		if line[i] == ' ' {
@@ -1165,7 +1173,15 @@ func splitKeyValue(content string) (string, string, error) {
 }
 
 func trimSpaces(s string) string {
-	return strings.Trim(s, " ")
+	start := 0
+	for start < len(s) && s[start] == ' ' {
+		start++
+	}
+	end := len(s)
+	for end > start && s[end-1] == ' ' {
+		end--
+	}
+	return s[start:end]
 }
 
 func decodeKeyToken(token string) (string, error) {

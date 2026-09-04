@@ -14,6 +14,12 @@ func UnquoteString(token string) (string, error) {
 		return "", errors.New("invalid quoted string")
 	}
 	body := token[1 : len(token)-1]
+	if strings.IndexByte(body, '\\') == -1 {
+		if !utf8.ValidString(body) {
+			return "", errors.New("invalid UTF-8 in quoted string")
+		}
+		return body, nil
+	}
 	var b strings.Builder
 	b.Grow(len(body))
 	for i := 0; i < len(body); i++ {
@@ -81,37 +87,44 @@ func IndexUnquoted(s string, target rune) int {
 	return -1
 }
 
+func trimSpaces(s string) string {
+	start := 0
+	for start < len(s) && s[start] == ' ' {
+		start++
+	}
+	end := len(s)
+	for end > start && s[end-1] == ' ' {
+		end--
+	}
+	return s[start:end]
+}
+
 // SplitInlineValues tokenizes a delimiter-separated list, respecting quoted segments.
 func SplitInlineValues(segment string, delimiter rune) ([]string, error) {
-	if strings.Trim(segment, " ") == "" {
+	if trimSpaces(segment) == "" {
 		return nil, nil
 	}
 	var tokens []string
-	var current strings.Builder
 	inQuotes := false
 	escaped := false
+	start := 0
 
-	for _, r := range segment {
+	for i, r := range segment {
 		switch {
 		case escaped:
-			current.WriteRune(r)
 			escaped = false
 		case r == '\\' && inQuotes:
-			current.WriteRune(r)
 			escaped = true
 		case r == '"':
-			current.WriteRune(r)
 			inQuotes = !inQuotes
 		case r == delimiter && !inQuotes:
-			tokens = append(tokens, strings.Trim(current.String(), " "))
-			current.Reset()
-		default:
-			current.WriteRune(r)
+			tokens = append(tokens, trimSpaces(segment[start:i]))
+			start = i + utf8.RuneLen(r)
 		}
 	}
 	if inQuotes {
 		return nil, errors.New("unterminated string in delimited values")
 	}
-	tokens = append(tokens, strings.Trim(current.String(), " "))
+	tokens = append(tokens, trimSpaces(segment[start:]))
 	return tokens, nil
 }
