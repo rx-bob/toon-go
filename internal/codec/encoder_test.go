@@ -1,6 +1,7 @@
 package codec
 
 import (
+	"bytes"
 	"fmt"
 	"math"
 	"math/big"
@@ -1132,4 +1133,183 @@ func TestTabularRowPlanConcurrentLookups(t *testing.T) {
 
 	wg.Wait()
 }
+
+func marshalGeneric(v any, opts ...EncoderOption) ([]byte, error) {
+	cfg := defaultEncoderOptions()
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	normalized, err := normalize(v, cfg)
+	if err != nil {
+		return nil, err
+	}
+	state := &encodeState{
+		cfg: cfg,
+		buf: newEncBuffer(estimateBufferSize(normalized)),
+	}
+	if err := state.encodeRoot(normalized); err != nil {
+		return nil, err
+	}
+	return state.buf.Bytes(), nil
+}
+
+type testScalarParityRow struct {
+	Str   string  `toon:"str"`
+	Bool  bool    `toon:"b"`
+	I8    int8    `toon:"i8"`
+	I16   int16   `toon:"i16"`
+	I32   int32   `toon:"i32"`
+	I64   int64   `toon:"i64"`
+	Int   int     `toon:"i"`
+	U8    uint8   `toon:"u8"`
+	U16   uint16  `toon:"u16"`
+	U32   uint32  `toon:"u32"`
+	U64   uint64  `toon:"u64"`
+	Uint  uint    `toon:"u"`
+	F32   float32 `toon:"f32"`
+	F64   float64 `toon:"f64"`
+}
+
+func TestDirectTabularRowParity(t *testing.T) {
+	rows := []testScalarParityRow{
+		{
+			Str: "alpha", Bool: true,
+			I8: -8, I16: -16, I32: -32, I64: -64, Int: -100,
+			U8: 8, U16: 16, U32: 32, U64: 64, Uint: 100,
+			F32: 1.5, F64: 3.14159,
+		},
+		{
+			Str: "beta,with,commas", Bool: false,
+			I8: 127, I16: 32767, I32: 2147483647, I64: 9007199254740990, Int: 42,
+			U8: 255, U16: 65535, U32: 4294967295, U64: 9007199254740990, Uint: 4242,
+			F32: -0.0, F64: 0.0,
+		},
+		{
+			Str: "quotes: \"hello\" and \\slashes\\", Bool: true,
+			I8: 0, I16: 0, I32: 0, I64: 0, Int: 0,
+			U8: 0, U16: 0, U32: 0, U64: 0, Uint: 0,
+			F32: float32(math.NaN()), F64: math.Inf(1),
+		},
+	}
+
+	delims := []struct {
+		name string
+		opt  EncoderOption
+	}{
+		{"comma", WithDelimiter(DelimiterComma)},
+		{"tab", WithDelimiter(DelimiterTab)},
+		{"pipe", WithDelimiter(DelimiterPipe)},
+	}
+
+	for _, d := range delims {
+		t.Run(d.name, func(t *testing.T) {
+			got, err := Marshal(rows, d.opt)
+			if err != nil {
+				t.Fatalf("Marshal failed: %v", err)
+			}
+			want, err := marshalGeneric(rows, d.opt)
+			if err != nil {
+				t.Fatalf("marshalGeneric failed: %v", err)
+			}
+			if !bytes.Equal(got, want) {
+				t.Errorf("mismatch for delimiter %s:\ngot:\n%s\nwant:\n%s", d.name, string(got), string(want))
+			}
+		})
+	}
+}
+
+func TestDirectTabularBoundaryParity(t *testing.T) {
+	type boundaryRow struct {
+		Name string  `toon:"name"`
+		I64  int64   `toon:"i64"`
+		U64  uint64  `toon:"u64"`
+		F64  float64 `toon:"f64"`
+		S    string  `toon:"s"`
+	}
+
+	rows := []boundaryRow{
+		{Name: "maxSafeInteger", I64: 9007199254740991, U64: 9007199254740991, F64: 1.0, S: "safe"},
+		{Name: "maxSafeInteger+1", I64: 9007199254740992, U64: 9007199254740992, F64: 1e20, S: "unsafe"},
+		{Name: "maxSafeInteger+100", I64: 9007199254741091, U64: 9007199254741091, F64: 1e-6, S: "unsafe2"},
+		{Name: "-maxSafeInteger", I64: -9007199254740991, U64: 0, F64: -1.0, S: "-safe"},
+		{Name: "-maxSafeInteger-1", I64: -9007199254740992, U64: 0, F64: -0.0, S: "-unsafe"},
+		{Name: "nan_and_inf", I64: 0, U64: 0, F64: math.NaN(), S: "true"},
+		{Name: "pos_inf", I64: 0, U64: 0, F64: math.Inf(1), S: "false"},
+		{Name: "neg_inf", I64: 0, U64: 0, F64: math.Inf(-1), S: "null"},
+		{Name: "numeric_string", I64: 1, U64: 1, F64: 0.1, S: "12345"},
+		{Name: "spaces", I64: 2, U64: 2, F64: 0.2, S: " with leading space"},
+		{Name: "multibyte_utf8", I64: 3, U64: 3, F64: 0.3, S: "こんにちは世界 🚀🎉"},
+		{Name: "control_chars", I64: 4, U64: 4, F64: 0.4, S: "line1\nline2\ttab\rcarriage"},
+	}
+
+	got, err := Marshal(rows)
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+	want, err := marshalGeneric(rows)
+	if err != nil {
+		t.Fatalf("marshalGeneric failed: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Errorf("boundary mismatch:\ngot:\n%s\nwant:\n%s", string(got), string(want))
+	}
+
+	// Also verify MarshalString parity
+	gotStr, err := MarshalString(rows)
+	if err != nil {
+		t.Fatalf("MarshalString failed: %v", err)
+	}
+	if gotStr != string(want) {
+		t.Errorf("MarshalString mismatch: got %q, want %q", gotStr, string(want))
+	}
+}
+
+func TestDirectTabularInvalidUTF8Error(t *testing.T) {
+	type invalidRow struct {
+		Name string `toon:"name"`
+		Val  int    `toon:"val"`
+	}
+
+	rows := []invalidRow{
+		{Name: "valid", Val: 1},
+		{Name: "bad\xffutf8", Val: 2},
+	}
+
+	_, err := Marshal(rows)
+	if err == nil {
+		t.Fatal("expected error for invalid UTF-8, got nil")
+	}
+	if !strings.Contains(err.Error(), "string is not valid UTF-8") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
+func TestDirectTabularAllocationZero(t *testing.T) {
+	payload := generateTabularPayload(1000)
+	rows := payload.Users
+	plan := cachedTabularRowPlan(reflect.TypeOf(BenchmarkRow{}), DelimiterComma)
+	if !plan.IsEligible() {
+		t.Fatalf("expected BenchmarkRow plan to be eligible: %s", plan.Reason())
+	}
+
+	val := reflect.ValueOf(rows)
+	var buf encBuffer
+	buf.Grow(1000 * 256)
+
+	allocs := testing.AllocsPerRun(20, func() {
+		buf.Reset()
+		ok, err := plan.appendRows(&buf, val, "", 0, 2, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !ok {
+			t.Fatal("expected appendRows to succeed")
+		}
+	})
+
+	if allocs != 0 {
+		t.Errorf("1000 rows appendRows allocated %f times, want 0", allocs)
+	}
+}
+
 

@@ -2,6 +2,7 @@ package codec
 
 import (
 	"fmt"
+	"reflect"
 	"strconv"
 	"strings"
 )
@@ -25,6 +26,31 @@ func NewEncoder(opts ...EncoderOption) *Encoder {
 // TOON data model (Section 2), then encoded using the concrete syntax rules
 // in Sections 5–12.
 func (e *Encoder) Marshal(v any) ([]byte, error) {
+	if val := reflect.ValueOf(v); val.IsValid() {
+		for val.Kind() == reflect.Pointer {
+			if val.IsNil() {
+				break
+			}
+			val = val.Elem()
+		}
+		if (val.Kind() == reflect.Slice || val.Kind() == reflect.Array) && val.Type().Elem().Kind() == reflect.Struct {
+			plan := cachedTabularRowPlan(val.Type().Elem(), e.cfg.delimiter)
+			if plan.IsEligible() && val.Len() > 0 {
+				state := &encodeState{
+					cfg: e.cfg,
+					buf: newEncBuffer(val.Len() * len(plan.fields) * 16),
+				}
+				ok, err := plan.appendRows(&state.buf, val, "", 0, e.cfg.indentSize, false)
+				if err != nil {
+					return nil, err
+				}
+				if ok {
+					return state.buf.Bytes(), nil
+				}
+			}
+		}
+	}
+
 	normalized, err := normalize(v, e.cfg)
 	if err != nil {
 		return nil, err
@@ -41,6 +67,31 @@ func (e *Encoder) Marshal(v any) ([]byte, error) {
 
 // MarshalString is equivalent to Marshal but returns a string.
 func (e *Encoder) MarshalString(v any) (string, error) {
+	if val := reflect.ValueOf(v); val.IsValid() {
+		for val.Kind() == reflect.Pointer {
+			if val.IsNil() {
+				break
+			}
+			val = val.Elem()
+		}
+		if (val.Kind() == reflect.Slice || val.Kind() == reflect.Array) && val.Type().Elem().Kind() == reflect.Struct {
+			plan := cachedTabularRowPlan(val.Type().Elem(), e.cfg.delimiter)
+			if plan.IsEligible() && val.Len() > 0 {
+				state := &encodeState{
+					cfg: e.cfg,
+					buf: newEncBuffer(val.Len() * len(plan.fields) * 16),
+				}
+				ok, err := plan.appendRows(&state.buf, val, "", 0, e.cfg.indentSize, false)
+				if err != nil {
+					return "", err
+				}
+				if ok {
+					return state.buf.String(), nil
+				}
+			}
+		}
+	}
+
 	normalized, err := normalize(v, e.cfg)
 	if err != nil {
 		return "", err
