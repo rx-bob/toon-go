@@ -100,9 +100,15 @@ func IndexUnquotedSWAR(data []byte, delim byte) int {
 // FindDelimsSWAR finds all unquoted occurrences of delim in data and appends their indices to dst.
 // It returns the resulting slice and a boolean indicating whether an unclosed quote was encountered.
 func FindDelimsSWAR(data []byte, delim byte, dst []int) ([]int, bool) {
+	indices, inQuotes, _ := FindDelimsSWARWithState(data, delim, dst, false, false)
+	return indices, inQuotes
+}
+
+// FindDelimsSWARWithState finds all unquoted occurrences of delim in data with given initial inQuotes and escaped states.
+func FindDelimsSWARWithState(data []byte, delim byte, dst []int, inQuotesIn bool, escapedIn bool) ([]int, bool, bool) {
 	n := len(data)
-	inQuotes := false
-	escaped := false
+	inQuotes := inQuotesIn
+	escaped := escapedIn
 	i := 0
 
 	for i+8 <= n {
@@ -182,15 +188,21 @@ func FindDelimsSWAR(data []byte, delim byte, dst []int) ([]int, bool) {
 		i++
 	}
 
-	return dst, inQuotes
+	return dst, inQuotes, escaped
 }
 
 // CountDelimsSWAR returns the total number of unquoted occurrences of delim in data.
 func CountDelimsSWAR(data []byte, delim byte) int {
+	count, _, _ := CountDelimsSWARWithState(data, delim, false, false)
+	return count
+}
+
+// CountDelimsSWARWithState counts all unquoted occurrences of delim in data with given initial inQuotes and escaped states.
+func CountDelimsSWARWithState(data []byte, delim byte, inQuotesIn bool, escapedIn bool) (int, bool, bool) {
 	n := len(data)
 	count := 0
-	inQuotes := false
-	escaped := false
+	inQuotes := inQuotesIn
+	escaped := escapedIn
 	i := 0
 
 	for i+8 <= n {
@@ -268,5 +280,5 @@ func CountDelimsSWAR(data []byte, delim byte) int {
 		i++
 	}
 
-	return count
+	return count, inQuotes, escaped
 }

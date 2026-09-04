@@ -1,10 +1,5 @@
 package simd
 
-import (
-	"encoding/binary"
-	"math/bits"
-)
-
 // Algorithm specifies which delimiter scanning implementation to execute.
 type Algorithm int
 
@@ -59,6 +54,9 @@ func ScanDelimAuto(data []byte, delim byte) int {
 func FindDelimsAuto(data []byte, delim byte, dst []int) ([]int, bool) {
 	if HasAVX2() && HasBMI2() {
 		return FindDelimsAVX2(data, delim, dst)
+	}
+	if HasNEON() {
+		return FindDelimsNEON(data, delim, dst)
 	}
 	return FindDelimsSWAR(data, delim, dst)
 }
@@ -126,39 +124,8 @@ func ScanDelimAVX2(data []byte, delim byte) int {
 
 // ScanDelimNEON counts unquoted occurrences of delim using a 16-byte vector stride.
 // On non-arm64 systems, it falls back to SWAR.
+// ScanDelimNEON counts unquoted occurrences of delim using NEON.
+// On non-arm64 systems or when NEON is unavailable, it falls back to SWAR.
 func ScanDelimNEON(data []byte, delim byte) int {
-	if !HasNEON() {
-		return ScanDelimSWAR(data, delim)
-	}
-
-	count := 0
-	inQuotes := false
-	i := 0
-	n := len(data)
-
-	// 16-byte vector stride pass
-	for i+16 <= n && !inQuotes {
-		w0 := binary.LittleEndian.Uint64(data[i:])
-		w1 := binary.LittleEndian.Uint64(data[i+8:])
-
-		quotes := hasByte64(w0, '"') | hasByte64(w1, '"')
-		slashes := hasByte64(w0, '\\') | hasByte64(w1, '\\')
-
-		if (quotes | slashes) == 0 {
-			delims := hasByte64(w0, delim) | hasByte64(w1, delim)
-			if delims != 0 {
-				count += bits.OnesCount64(hasByte64(w0, delim)) + bits.OnesCount64(hasByte64(w1, delim))
-			}
-			i += 16
-			continue
-		}
-		break
-	}
-
-	// Remainder processed with SWAR
-	if i < n {
-		count += ScanDelimSWAR(data[i:], delim)
-	}
-
-	return count
+	return CountDelimsNEON(data, delim)
 }

@@ -535,5 +535,104 @@ func TestAVX2_FallbackOnSimulatedDisabled(t *testing.T) {
 	}
 }
 
+func TestNEON_DifferentialAgainstSWAR_10000Rows(t *testing.T) {
+	if !HasNEON() {
+		t.Skip("skipping NEON differential test: host CPU does not support NEON")
+	}
+
+	rng := rand.New(rand.NewSource(12345))
+	delims := []byte{',', '\t', '|', ';', ':'}
+
+	for rowIdx := 0; rowIdx < 10000; rowIdx++ {
+		delim := delims[rng.Intn(len(delims))]
+		numCols := rng.Intn(20) + 1
+		var rowParts [][]byte
+
+		for col := 0; col < numCols; col++ {
+			fieldMode := rng.Intn(6)
+			var field []byte
+			switch fieldMode {
+			case 0: // Plain alphanumeric
+				length := rng.Intn(40)
+				field = make([]byte, length)
+				for k := range field {
+					field[k] = byte('a' + rng.Intn(26))
+				}
+			case 1: // Quoted with embedded delimiter
+				field = []byte(fmt.Sprintf("\"field_%d_%c_val\"", col, delim))
+			case 2: // Escaped quotes inside quoted string
+				field = []byte(`"escaped \" quote"`)
+			case 3: // Double backslashes
+				field = []byte(`"escaped \\ backslash"`)
+			case 4: // Empty field
+				field = []byte("")
+			case 5: // Variable length padding spanning 16-byte chunk boundary
+				length := 15 + (rng.Intn(5) - 2) // 13..17 bytes
+				field = bytes.Repeat([]byte{'x'}, length)
+			}
+			rowParts = append(rowParts, field)
+		}
+
+		row := bytes.Join(rowParts, []byte{delim})
+
+		// SWAR Baseline Outputs
+		wantIndices, wantInQuotes := FindDelimsSWAR(row, delim, nil)
+		wantCount := ScanDelimSWAR(row, delim)
+
+		// NEON Kernel Outputs
+		gotIndices, gotInQuotes := FindDelimsNEON(row, delim, nil)
+		gotCount := ScanDelimNEON(row, delim)
+
+		if gotInQuotes != wantInQuotes {
+			t.Fatalf("row %d: inQuotes mismatch: NEON=%v, SWAR=%v, input=%q", rowIdx, gotInQuotes, wantInQuotes, row)
+		}
+		if gotCount != wantCount {
+			t.Fatalf("row %d: count mismatch: NEON=%d, SWAR=%d, input=%q", rowIdx, gotCount, wantCount, row)
+		}
+		if len(gotIndices) != len(wantIndices) {
+			t.Fatalf("row %d: indices length mismatch: NEON=%v (len %d), SWAR=%v (len %d), input=%q",
+				rowIdx, gotIndices, len(gotIndices), wantIndices, len(wantIndices), row)
+		}
+		for k := range gotIndices {
+			if gotIndices[k] != wantIndices[k] {
+				t.Fatalf("row %d: index[%d] mismatch: NEON=%d, SWAR=%d, input=%q",
+					rowIdx, k, gotIndices[k], wantIndices[k], row)
+			}
+		}
+	}
+}
+
+func TestNEON_AlignedAndUnalignedBuffers(t *testing.T) {
+	if !HasNEON() {
+		t.Skip("skipping NEON test: host CPU does not support NEON")
+	}
+
+	for size := 0; size <= 128; size++ {
+		for delimPos := 0; delimPos < size; delimPos++ {
+			buf := make([]byte, size)
+			for i := range buf {
+				buf[i] = 'a'
+			}
+			buf[delimPos] = ','
+
+			wantIndices, wantQuotes := FindDelimsSWAR(buf, ',', nil)
+			gotIndices, gotQuotes := FindDelimsNEON(buf, ',', nil)
+
+			if wantQuotes != gotQuotes {
+				t.Fatalf("size %d delimPos %d: inQuotes mismatch: NEON=%v, SWAR=%v", size, delimPos, gotQuotes, wantQuotes)
+			}
+			if len(wantIndices) != len(gotIndices) || (len(wantIndices) > 0 && wantIndices[0] != gotIndices[0]) {
+				t.Fatalf("size %d delimPos %d: indices mismatch: NEON=%v, SWAR=%v", size, delimPos, gotIndices, wantIndices)
+			}
+
+			wantCount := ScanDelimSWAR(buf, ',')
+			gotCount := ScanDelimNEON(buf, ',')
+			if wantCount != gotCount {
+				t.Fatalf("size %d delimPos %d: count mismatch: NEON=%d, SWAR=%d", size, delimPos, gotCount, wantCount)
+			}
+		}
+	}
+}
+
 
 

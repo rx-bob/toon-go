@@ -33,13 +33,21 @@ func FindDelimsAVX2(data []byte, delim byte, dst []int) ([]int, bool) {
 		if bytesConsumed < 32 && processed < n {
 			remData := data[processed:]
 			var swarDst []int
-			swarDst, inQuotes = FindDelimsSWAR(remData, delim, dst)
-			return swarDst, inQuotes
+			swarDst, inQuotes, _ = FindDelimsSWARWithState(remData, delim, nil, inQuotes, false)
+			for _, idx := range swarDst {
+				dst = append(dst, processed+idx)
+			}
+			return dst, inQuotes
 		}
 	}
 
 	if processed < n {
-		return FindDelimsSWAR(data[processed:], delim, dst)
+		var remIndices []int
+		remIndices, inQuotes, _ = FindDelimsSWARWithState(data[processed:], delim, nil, inQuotes, false)
+		for _, idx := range remIndices {
+			dst = append(dst, processed+idx)
+		}
+		return dst, inQuotes
 	}
 
 	return dst, inQuotes
@@ -51,9 +59,20 @@ func CountDelimsAVX2(data []byte, delim byte) int {
 		return CountDelimsSWAR(data, delim)
 	}
 
-	count, _, processed := countDelimsAVX2Asm(data, delim, false)
+	count, inQuotes, processed := countDelimsAVX2Asm(data, delim, false)
 	if processed < len(data) {
-		count += CountDelimsSWAR(data[processed:], delim)
+		remCount, _, _ := CountDelimsSWARWithState(data[processed:], delim, inQuotes, false)
+		count += remCount
 	}
 	return count
+}
+
+// FindDelimsNEON falls back to SWAR on amd64.
+func FindDelimsNEON(data []byte, delim byte, dst []int) ([]int, bool) {
+	return FindDelimsSWAR(data, delim, dst)
+}
+
+// CountDelimsNEON falls back to SWAR on amd64.
+func CountDelimsNEON(data []byte, delim byte) int {
+	return CountDelimsSWAR(data, delim)
 }
