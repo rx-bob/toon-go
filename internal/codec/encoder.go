@@ -97,15 +97,12 @@ func (s *encodeState) indent(depth int) string {
 func (s *encodeState) encodeRoot(value normalizedValue) error {
 	switch val := value.(type) {
 	case nil, bool, string, numberValue:
-		token, err := formatPrimitive(val, formatContext{
+		s.startLine()
+		return s.buf.appendPrimitive(val, formatContext{
 			active:   s.cfg.delimiter,
 			document: s.cfg.delimiter,
 			inArray:  false,
 		})
-		if err != nil {
-			return err
-		}
-		s.emit(token)
 	case Object:
 		if err := s.encodeObject(val, 0); err != nil {
 			return err
@@ -139,15 +136,17 @@ func (s *encodeState) encodeObject(obj Object, depth int) error {
 			if err != nil {
 				return err
 			}
-			token, err := formatPrimitive(val, formatContext{
+			s.startLine()
+			s.writeIndent(depth)
+			s.buf.WriteString(keyLiteral)
+			s.buf.WriteString(": ")
+			if err := s.buf.appendPrimitive(val, formatContext{
 				active:   s.cfg.delimiter,
 				document: s.cfg.delimiter,
 				inArray:  false,
-			})
-			if err != nil {
+			}); err != nil {
 				return err
 			}
-			s.emit(indent + keyLiteral + ": " + token)
 		case Object:
 			keyLiteral, err := encodeKey(field.Key)
 			if err != nil {
@@ -206,15 +205,14 @@ func (s *encodeState) encodeArray(key string, values []normalizedValue, depth in
 		s.buf.WriteString(header)
 		if len(values) > 0 {
 			s.buf.WriteByte(' ')
+			delimRune := delimiter.rune()
 			for i, v := range values {
 				if i > 0 {
-					s.buf.WriteRune(delimiter.rune())
+					s.buf.WriteRune(delimRune)
 				}
-				token, err := formatPrimitive(v, ctx)
-				if err != nil {
+				if err := s.buf.appendPrimitive(v, ctx); err != nil {
 					return err
 				}
-				s.buf.WriteString(token)
 			}
 		}
 		return nil
@@ -232,11 +230,9 @@ func (s *encodeState) encodeArray(key string, values []normalizedValue, depth in
 				if i > 0 {
 					s.buf.WriteRune(delimRune)
 				}
-				token, err := formatPrimitive(field, ctx)
-				if err != nil {
+				if err := s.buf.appendPrimitive(field, ctx); err != nil {
 					return err
 				}
-				s.buf.WriteString(token)
 			}
 		}
 		return nil
@@ -261,11 +257,10 @@ func (s *encodeState) encodeArray(key string, values []normalizedValue, depth in
 func (s *encodeState) encodeArrayItem(item normalizedValue, depth int, ctx formatContext) error {
 	switch v := item.(type) {
 	case nil, bool, string, numberValue:
-		token, err := formatPrimitive(v, ctx)
-		if err != nil {
-			return err
-		}
-		s.emit(s.indent(depth) + "- " + token)
+		s.startLine()
+		s.writeIndent(depth)
+		s.buf.WriteString("- ")
+		return s.buf.appendPrimitive(v, ctx)
 	case Object:
 		if err := s.encodeObjectListItem(v, depth, ctx); err != nil {
 			return err
@@ -281,11 +276,10 @@ func (s *encodeState) encodeArrayItem(item normalizedValue, depth int, ctx forma
 func (s *encodeState) encodeListItem(item normalizedValue, depth int, ctx formatContext) error {
 	switch v := item.(type) {
 	case nil, bool, string, numberValue:
-		token, err := formatPrimitive(v, ctx)
-		if err != nil {
-			return err
-		}
-		s.emit(s.indent(depth) + "- " + token)
+		s.startLine()
+		s.writeIndent(depth)
+		s.buf.WriteString("- ")
+		return s.buf.appendPrimitive(v, ctx)
 	case Object:
 		if err := s.encodeObjectListItem(v, depth, ctx); err != nil {
 			return err
@@ -309,11 +303,14 @@ func (s *encodeState) encodeObjectListItem(obj Object, depth int, ctx formatCont
 		if err != nil {
 			return err
 		}
-		token, err := formatPrimitive(first.Value, ctx)
-		if err != nil {
+		s.startLine()
+		s.writeIndent(depth)
+		s.buf.WriteString("- ")
+		s.buf.WriteString(keyLiteral)
+		s.buf.WriteString(": ")
+		if err := s.buf.appendPrimitive(first.Value, ctx); err != nil {
 			return err
 		}
-		s.emit(s.indent(depth) + "- " + keyLiteral + ": " + token)
 		if len(obj.Fields) > 1 {
 			if err := s.encodeObject(Object{Fields: obj.Fields[1:]}, depth+1); err != nil {
 				return err
@@ -407,19 +404,18 @@ func (s *encodeState) encodeKeyedObject(obj Object, keyLiteral string, depth int
 		s.buf.WriteString(entryKey)
 		s.buf.WriteString(": ")
 		delimRune := s.cfg.delimiter.rune()
+		elemCtx := formatContext{
+			active:   s.cfg.delimiter,
+			document: s.cfg.delimiter,
+			inArray:  true,
+		}
 		for j, value := range flattenObjectValues(entry, fields) {
 			if j > 0 {
 				s.buf.WriteRune(delimRune)
 			}
-			token, err := formatPrimitive(value, formatContext{
-				active:   s.cfg.delimiter,
-				document: s.cfg.delimiter,
-				inArray:  true,
-			})
-			if err != nil {
+			if err := s.buf.appendPrimitive(value, elemCtx); err != nil {
 				return false, err
 			}
-			s.buf.WriteString(token)
 		}
 	}
 	return true, nil
@@ -445,11 +441,9 @@ func (s *encodeState) encodeArrayForObjectListItem(keyLiteral string, values []n
 					if i > 0 {
 						s.buf.WriteRune(delimRune)
 					}
-					token, err := formatPrimitive(field, ctx)
-					if err != nil {
+					if err := s.buf.appendPrimitive(field, ctx); err != nil {
 						return err
 					}
-					s.buf.WriteString(token)
 				}
 			}
 			return nil
@@ -472,15 +466,14 @@ func (s *encodeState) encodeArrayForObjectListItem(keyLiteral string, values []n
 		s.buf.WriteString(header)
 		if len(values) > 0 {
 			s.buf.WriteByte(' ')
+			delimRune := delimiter.rune()
 			for i, v := range values {
 				if i > 0 {
-					s.buf.WriteRune(delimiter.rune())
+					s.buf.WriteRune(delimRune)
 				}
-				token, err := formatPrimitive(v, ctx)
-				if err != nil {
+				if err := s.buf.appendPrimitive(v, ctx); err != nil {
 					return err
 				}
-				s.buf.WriteString(token)
 			}
 		}
 		return nil

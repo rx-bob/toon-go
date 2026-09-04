@@ -112,7 +112,7 @@ func estimateBufferSize(v normalizedValue) int {
 			return n*12 + 32
 		}
 		if fields, ok := detectTabular(val); ok {
-			rowWidth := len(fields) * 16
+			rowWidth := len(fields) * 20
 			return 64 + n*(rowWidth+2)
 		}
 		sample := estimateBufferSize(val[0])

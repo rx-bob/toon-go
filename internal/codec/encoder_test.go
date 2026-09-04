@@ -1,6 +1,8 @@
 package codec
 
 import (
+	"fmt"
+	"math"
 	"math/big"
 	"strings"
 	"testing"
@@ -226,4 +228,124 @@ func TestEncoderBufferPreallocationEstimates(t *testing.T) {
 	if hint < 1000 {
 		t.Errorf("estimateBufferSize for 100 rows = %d, expected >= 1000", hint)
 	}
+}
+
+func TestAppendPrimitiveParity(t *testing.T) {
+	cfg := defaultEncoderOptions()
+
+	delimiters := []struct {
+		name  string
+		delim Delimiter
+	}{
+		{"comma", DelimiterComma},
+		{"tab", DelimiterTab},
+		{"pipe", DelimiterPipe},
+	}
+
+	testValues := []struct {
+		name string
+		val  any
+	}{
+		{"nil", nil},
+		{"true", true},
+		{"false", false},
+		{"int_zero", 0},
+		{"int_42", 42},
+		{"int_negative", -100},
+		{"int_max_safe", int64(9007199254740991)},
+		{"int_min_safe", int64(-9007199254740991)},
+		{"big_int_beyond_safe", big.NewInt(9007199254740992)},
+		{"float_zero", 0.0},
+		{"float_neg_zero", math.Copysign(0, -1)},
+		{"float_pi", 3.14159},
+		{"float_exp_small", 1e-7},
+		{"float_exp_large", 1e20},
+		{"float_nan", math.NaN()},
+		{"float_pos_inf", math.Inf(1)},
+		{"float_neg_inf", math.Inf(-1)},
+		{"str_empty", ""},
+		{"str_clean", "cleanText"},
+		{"str_clean_sentence", "hello world"},
+		{"str_kw_true", "true"},
+		{"str_kw_false", "false"},
+		{"str_kw_null", "null"},
+		{"str_num_lookalike", "123"},
+		{"str_num_decimal", "0123"},
+		{"str_leading_dash", "-item"},
+		{"str_leading_hash", "#comment"},
+		{"str_leading_space", " hello"},
+		{"str_trailing_space", "world "},
+		{"str_with_comma", "foo,bar"},
+		{"str_with_tab", "foo\tbar"},
+		{"str_with_pipe", "foo|bar"},
+		{"str_with_quotes", `foo "bar" baz`},
+		{"str_with_escapes", "line1\nline2\r\t"},
+		{"str_with_control_byte", "ctrl\x01test"},
+		{"str_unicode", "東京🗼café"},
+	}
+
+	for _, d := range delimiters {
+		for _, inArray := range []bool{false, true} {
+			ctx := formatContext{
+				active:   d.delim,
+				document: d.delim,
+				inArray:  inArray,
+			}
+			for _, tv := range testValues {
+				testName := fmt.Sprintf("%s_%s_inArray=%v", tv.name, d.name, inArray)
+				t.Run(testName, func(t *testing.T) {
+					norm, normErr := normalize(tv.val, cfg)
+					if normErr != nil {
+						t.Fatalf("normalize failed: %v", normErr)
+					}
+
+					wantStr, wantErr := formatPrimitive(norm, ctx)
+
+					var b encBuffer
+					gotErr := b.appendPrimitive(norm, ctx)
+
+					if (wantErr != nil) != (gotErr != nil) {
+						t.Fatalf("err mismatch: formatPrimitive err=%v, appendPrimitive err=%v", wantErr, gotErr)
+					}
+					if wantErr != nil {
+						if wantErr.Error() != gotErr.Error() {
+							t.Fatalf("err msg mismatch: got %q, want %q", gotErr.Error(), wantErr.Error())
+						}
+						return
+					}
+
+					gotStr := b.String()
+					if gotStr != wantStr {
+						t.Errorf("output mismatch:\ngot:  %q\nwant: %q", gotStr, wantStr)
+					}
+				})
+			}
+		}
+	}
+
+	// Test unsupported primitive error parity
+	t.Run("unsupported_primitive", func(t *testing.T) {
+		ctx := formatContext{active: DelimiterComma, document: DelimiterComma, inArray: false}
+		unsupported := struct{}{}
+		wantErr := fmt.Sprintf("toon: unsupported primitive %T", unsupported)
+
+		var b encBuffer
+		err := b.appendPrimitive(unsupported, ctx)
+		if err == nil || err.Error() != wantErr {
+			t.Errorf("got %v, want error %q", err, wantErr)
+		}
+	})
+
+	// Test invalid UTF-8 string error parity
+	t.Run("invalid_utf8", func(t *testing.T) {
+		ctx := formatContext{active: DelimiterComma, document: DelimiterComma, inArray: false}
+		invalidStr := "hello\xffworld"
+		wantErr := "toon: string is not valid UTF-8"
+
+		var b encBuffer
+		err := b.appendPrimitive(invalidStr, ctx)
+		if err == nil || err.Error() != wantErr {
+			t.Errorf("got %v, want error %q", err, wantErr)
+		}
+	})
 }

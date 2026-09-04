@@ -20,6 +20,34 @@ func (c formatContext) toInternal() formatpkg.Context {
 	}
 }
 
+func (b *encBuffer) appendPrimitive(value normalizedValue, ctx formatContext) error {
+	switch v := value.(type) {
+	case nil:
+		b.WriteString("null")
+		return nil
+	case bool:
+		if v {
+			b.WriteString("true")
+		} else {
+			b.WriteString("false")
+		}
+		return nil
+	case string:
+		var err error
+		b.buf, err = formatpkg.AppendFormatString(b.buf, v, ctx.toInternal())
+		return err
+	case numberValue:
+		b.WriteString(v.literal)
+		return nil
+	default:
+		return fmt.Errorf("toon: unsupported primitive %T", value)
+	}
+}
+
+func appendPrimitive(b *encBuffer, value normalizedValue, ctx formatContext) error {
+	return b.appendPrimitive(value, ctx)
+}
+
 func formatPrimitive(value normalizedValue, ctx formatContext) (string, error) {
 	switch v := value.(type) {
 	case nil:

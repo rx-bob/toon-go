@@ -65,78 +65,109 @@ func NeedsQuoting(s string, ctx Context) bool {
 	return false
 }
 
-// QuoteString escapes and wraps the string in double quotes.
-func QuoteString(s string) (string, error) {
+const hexDigits = "0123456789abcdef"
+
+// AppendFormatString applies TOON quoting rules to the provided string and appends to dst.
+func AppendFormatString(dst []byte, s string, ctx Context) ([]byte, error) {
+	if err := ValidateCharacters(s); err != nil {
+		return dst, err
+	}
+	if NeedsQuoting(s, ctx) {
+		return AppendQuoteString(dst, s), nil
+	}
+	return append(dst, s...), nil
+}
+
+// AppendQuoteString escapes and wraps the string in double quotes, appending to dst.
+func AppendQuoteString(dst []byte, s string) []byte {
 	if !utf8.ValidString(s) {
-		return quoteStringScalar(s), nil
+		return appendQuoteStringScalar(dst, s)
 	}
 
-	var b strings.Builder
-	b.Grow(len(s) + 2)
-	b.WriteByte('"')
+	dst = append(dst, '"')
 
 	data := stringBytes(s)
 	start := 0
 	for start < len(s) {
 		idx := simd.IndexSpecialOrControlAuto(data[start:], 0)
 		if idx < 0 {
-			b.WriteString(s[start:])
+			dst = append(dst, s[start:]...)
 			break
 		}
 		idx += start
-		b.WriteString(s[start:idx])
+		dst = append(dst, s[start:idx]...)
 		switch s[idx] {
 		case '\\':
-			b.WriteString("\\\\")
+			dst = append(dst, '\\', '\\')
 		case '"':
-			b.WriteString("\\\"")
+			dst = append(dst, '\\', '"')
 		case '\n':
-			b.WriteString("\\n")
+			dst = append(dst, '\\', 'n')
 		case '\r':
-			b.WriteString("\\r")
+			dst = append(dst, '\\', 'r')
 		case '\t':
-			b.WriteString("\\t")
+			dst = append(dst, '\\', 't')
 		default:
 			if s[idx] < 0x20 {
-				fmt.Fprintf(&b, `\u%04x`, s[idx])
+				dst = append(dst, '\\', 'u', '0', '0', hexDigits[(s[idx]>>4)&0x0f], hexDigits[s[idx]&0x0f])
 			} else {
-				b.WriteByte(s[idx])
+				dst = append(dst, s[idx])
 			}
 		}
 		start = idx + 1
 	}
-	b.WriteByte('"')
-	return b.String(), nil
+	dst = append(dst, '"')
+	return dst
 }
 
-// quoteStringScalar preserves QuoteString's historical range-based behavior
+// QuoteString escapes and wraps the string in double quotes.
+func QuoteString(s string) (string, error) {
+	buf := AppendQuoteString(make([]byte, 0, len(s)+2), s)
+	return string(buf), nil
+}
+
+// appendQuoteStringScalar preserves QuoteString's historical range-based behavior
 // for invalid UTF-8 input, where invalid byte sequences become RuneError.
-func quoteStringScalar(s string) string {
-	var b strings.Builder
-	b.Grow(len(s) + 2)
-	b.WriteByte('"')
+func appendQuoteStringScalar(dst []byte, s string) []byte {
+	dst = append(dst, '"')
 	for _, r := range s {
 		switch r {
 		case '\\':
-			b.WriteString("\\\\")
+			dst = append(dst, '\\', '\\')
 		case '"':
-			b.WriteString("\\\"")
+			dst = append(dst, '\\', '"')
 		case '\n':
-			b.WriteString("\\n")
+			dst = append(dst, '\\', 'n')
 		case '\r':
-			b.WriteString("\\r")
+			dst = append(dst, '\\', 'r')
 		case '\t':
-			b.WriteString("\\t")
+			dst = append(dst, '\\', 't')
 		default:
 			if r < 0x20 {
-				fmt.Fprintf(&b, `\u%04x`, r)
+				dst = append(dst, '\\', 'u',
+					hexDigits[(r>>12)&0x0f],
+					hexDigits[(r>>8)&0x0f],
+					hexDigits[(r>>4)&0x0f],
+					hexDigits[r&0x0f],
+				)
 				continue
 			}
-			b.WriteRune(r)
+			if r < utf8.RuneSelf {
+				dst = append(dst, byte(r))
+			} else {
+				var tmp [utf8.UTFMax]byte
+				n := utf8.EncodeRune(tmp[:], r)
+				dst = append(dst, tmp[:n]...)
+			}
 		}
 	}
-	b.WriteByte('"')
-	return b.String()
+	dst = append(dst, '"')
+	return dst
+}
+
+func quoteStringScalar(s string) string {
+	buf := appendQuoteStringScalar(make([]byte, 0, len(s)+2), s)
+	return string(buf)
 }
 
 func stringBytes(s string) []byte {
