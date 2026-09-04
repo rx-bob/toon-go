@@ -1,5 +1,7 @@
 package codec
 
+import "reflect"
+
 // normalizedValue represents a value that has been normalized according to the
 // TOON data model and is ready for emission by the encoder.
 type normalizedValue interface{}
@@ -58,5 +60,11 @@ type tabularLayout struct {
 	fields      []fieldNode
 	columns     []tabularColumn
 	rowMappings [][]int
+}
+
+// rawTabularSlice encapsulates an eligible slice or array of structs ready for direct tabular emission.
+type rawTabularSlice struct {
+	val  reflect.Value
+	plan *tabularRowPlan
 }
 

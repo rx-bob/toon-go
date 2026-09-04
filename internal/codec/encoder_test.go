@@ -1312,4 +1312,241 @@ func TestDirectTabularAllocationZero(t *testing.T) {
 	}
 }
 
+type NamedBenchmarkRows []BenchmarkRow
+
+type (
+	testContainerTyped struct {
+		Title  string         `toon:"title"`
+		Users  []BenchmarkRow `toon:"users"`
+		Footer string         `toon:"footer"`
+	}
+
+	testContainerGeneric struct {
+		Title  string `toon:"title"`
+		Users  any    `toon:"users"`
+		Footer string `toon:"footer"`
+	}
+
+	testContainerGenericOnlyUsers struct {
+		Users any `toon:"users"`
+	}
+
+	testContainerNamedSlice struct {
+		Users NamedBenchmarkRows `toon:"users"`
+	}
+
+	testContainerArray struct {
+		Users [3]BenchmarkRow `toon:"users"`
+	}
+
+	testContainerPointerRows struct {
+		Users []*BenchmarkRow `toon:"users"`
+	}
+
+	testContainerOmitempty struct {
+		Title string         `toon:"title"`
+		Users []BenchmarkRow `toon:"users,omitempty"`
+	}
+
+	testContainerEmptySlice struct {
+		Title string         `toon:"title"`
+		Users []BenchmarkRow `toon:"users"`
+	}
+
+	testComplexContainerTyped struct {
+		ID     int             `toon:"id"`
+		Users1 []BenchmarkRow  `toon:"users1"`
+		Note   string          `toon:"note"`
+		Users2 [2]BenchmarkRow `toon:"users2"`
+		Done   bool            `toon:"done"`
+	}
+
+	testComplexContainerGeneric struct {
+		ID     int    `toon:"id"`
+		Users1 any    `toon:"users1"`
+		Note   string `toon:"note"`
+		Users2 any    `toon:"users2"`
+		Done   bool   `toon:"done"`
+	}
+)
+
+func TestContainingStructTypedTabularSlices(t *testing.T) {
+	rows := generateTabularPayload(10).Users
+
+	t.Run("surrounding_fields_parity", func(t *testing.T) {
+		delims := []struct {
+			name string
+			opt  EncoderOption
+		}{
+			{"comma", WithDelimiter(DelimiterComma)},
+			{"tab", WithDelimiter(DelimiterTab)},
+			{"pipe", WithDelimiter(DelimiterPipe)},
+		}
+
+		for _, d := range delims {
+			t.Run(d.name, func(t *testing.T) {
+				typed := testContainerTyped{
+					Title:  "Enterprise Directory",
+					Users:  rows,
+					Footer: "Confidential",
+				}
+				generic := testContainerGeneric{
+					Title:  "Enterprise Directory",
+					Users:  rows,
+					Footer: "Confidential",
+				}
+
+				gotBytes, err := Marshal(typed, d.opt)
+				if err != nil {
+					t.Fatalf("Marshal(typed) failed: %v", err)
+				}
+				wantBytes, err := Marshal(generic, d.opt)
+				if err != nil {
+					t.Fatalf("Marshal(generic) failed: %v", err)
+				}
+
+				if !bytes.Equal(gotBytes, wantBytes) {
+					t.Errorf("delimiter %s mismatch:\ngot:\n%s\nwant:\n%s", d.name, string(gotBytes), string(wantBytes))
+				}
+			})
+		}
+	})
+
+	t.Run("named_slice_type", func(t *testing.T) {
+		named := testContainerNamedSlice{Users: NamedBenchmarkRows(rows)}
+		generic := testContainerGenericOnlyUsers{Users: rows}
+
+		gotBytes, err := Marshal(named)
+		if err != nil {
+			t.Fatalf("Marshal(named) failed: %v", err)
+		}
+		wantBytes, err := Marshal(generic)
+		if err != nil {
+			t.Fatalf("Marshal(generic) failed: %v", err)
+		}
+		if !bytes.Equal(gotBytes, wantBytes) {
+			t.Errorf("named slice mismatch:\ngot:\n%s\nwant:\n%s", string(gotBytes), string(wantBytes))
+		}
+	})
+
+	t.Run("array_type", func(t *testing.T) {
+		var arr [3]BenchmarkRow
+		copy(arr[:], rows[:3])
+		arrContainer := testContainerArray{Users: arr}
+		generic := testContainerGenericOnlyUsers{Users: arr[:]}
+
+		gotBytes, err := Marshal(arrContainer)
+		if err != nil {
+			t.Fatalf("Marshal(arrContainer) failed: %v", err)
+		}
+		wantBytes, err := Marshal(generic)
+		if err != nil {
+			t.Fatalf("Marshal(generic) failed: %v", err)
+		}
+		if !bytes.Equal(gotBytes, wantBytes) {
+			t.Errorf("array mismatch:\ngot:\n%s\nwant:\n%s", string(gotBytes), string(wantBytes))
+		}
+	})
+
+	t.Run("pointer_rows_fallback", func(t *testing.T) {
+		ptrRows := make([]*BenchmarkRow, len(rows))
+		for i := range rows {
+			ptrRows[i] = &rows[i]
+		}
+		ptrContainer := testContainerPointerRows{Users: ptrRows}
+		generic := testContainerGenericOnlyUsers{Users: ptrRows}
+
+		gotBytes, err := Marshal(ptrContainer)
+		if err != nil {
+			t.Fatalf("Marshal(ptrContainer) failed: %v", err)
+		}
+		wantBytes, err := Marshal(generic)
+		if err != nil {
+			t.Fatalf("Marshal(generic) failed: %v", err)
+		}
+		if !bytes.Equal(gotBytes, wantBytes) {
+			t.Errorf("pointer rows fallback mismatch:\ngot:\n%s\nwant:\n%s", string(gotBytes), string(wantBytes))
+		}
+	})
+
+	t.Run("omitempty_container", func(t *testing.T) {
+		// Empty / nil slice should be omitted
+		omitEmpty := testContainerOmitempty{Title: "Only Title", Users: nil}
+		got, err := Marshal(omitEmpty)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(got), "users") {
+			t.Errorf("expected users to be omitted, got %q", string(got))
+		}
+
+		// Non-empty should be emitted tabularly
+		omitNonEmpty := testContainerOmitempty{Title: "With Users", Users: rows}
+		gotNonEmpty, err := Marshal(omitNonEmpty)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(gotNonEmpty), "users[10]{id,name") {
+			t.Errorf("expected users[10] header, got %q", string(gotNonEmpty))
+		}
+	})
+
+	t.Run("empty_slice_fallback", func(t *testing.T) {
+		emptyCont := testContainerEmptySlice{Title: "Empty", Users: nil}
+		got, err := Marshal(emptyCont)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// In TOON, empty array field is users: []
+		if !strings.Contains(string(got), "users: []") {
+			t.Errorf("expected users: [], got %q", string(got))
+		}
+	})
+
+	t.Run("complex_mixed_surrounding_fields", func(t *testing.T) {
+		var arr2 [2]BenchmarkRow
+		copy(arr2[:], rows[5:7])
+
+		typed := testComplexContainerTyped{
+			ID:     42,
+			Users1: rows[:3],
+			Note:   "intermediate",
+			Users2: arr2,
+			Done:   true,
+		}
+		generic := testComplexContainerGeneric{
+			ID:     42,
+			Users1: rows[:3],
+			Note:   "intermediate",
+			Users2: arr2[:],
+			Done:   true,
+		}
+
+		gotBytes, err := Marshal(typed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantBytes, err := Marshal(generic)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(gotBytes, wantBytes) {
+			t.Errorf("complex container mismatch:\ngot:\n%s\nwant:\n%s", string(gotBytes), string(wantBytes))
+		}
+	})
+
+	t.Run("benchmark_payload_allocation_drop", func(t *testing.T) {
+		payload := generateTabularPayload(1000)
+		allocs := testing.AllocsPerRun(10, func() {
+			_, err := Marshal(payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+		})
+		if allocs > 50 {
+			t.Errorf("Marshal(TabularPayload 1000 rows) allocated %f times, expected <= 50", allocs)
+		}
+	})
+}
+
 

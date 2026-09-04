@@ -117,6 +117,13 @@ func estimateBufferSize(v normalizedValue) int {
 		}
 		sample := estimateBufferSize(val[0])
 		return n * (sample + 8)
+	case rawTabularSlice:
+		n := val.val.Len()
+		if n == 0 {
+			return 16
+		}
+		rowWidth := len(val.plan.fields) * 20
+		return 64 + n*(rowWidth+2)
 	default:
 		return 64
 	}

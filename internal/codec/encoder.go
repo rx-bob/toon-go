@@ -162,6 +162,10 @@ func (s *encodeState) encodeRoot(value normalizedValue) error {
 		if err := s.encodeArray("", val, 0, true); err != nil {
 			return err
 		}
+	case rawTabularSlice:
+		if _, err := val.plan.appendRows(&s.buf, val.val, "", 0, s.cfg.indentSize, false); err != nil {
+			return err
+		}
 	default:
 		return fmt.Errorf("toon: unsupported root value %T", value)
 	}
@@ -216,6 +220,14 @@ func (s *encodeState) encodeObject(obj Object, depth int) error {
 			}
 		case []normalizedValue:
 			if err := s.encodeArray(field.Key, val, depth, false); err != nil {
+				return err
+			}
+		case rawTabularSlice:
+			keyLiteral, err := encodeKey(field.Key)
+			if err != nil {
+				return err
+			}
+			if _, err := val.plan.appendRows(&s.buf, val.val, keyLiteral, depth, s.cfg.indentSize, false); err != nil {
 				return err
 			}
 		default:
@@ -318,6 +330,9 @@ func (s *encodeState) encodeArrayItem(item normalizedValue, depth int, ctx forma
 		}
 	case []normalizedValue:
 		return s.encodeArrayForObjectListItem("", v, depth, ctx)
+	case rawTabularSlice:
+		_, err := v.plan.appendRows(&s.buf, v.val, "", depth, s.cfg.indentSize, true)
+		return err
 	default:
 		return fmt.Errorf("toon: unsupported array item %T", v)
 	}
@@ -337,6 +352,9 @@ func (s *encodeState) encodeListItem(item normalizedValue, depth int, ctx format
 		}
 	case []normalizedValue:
 		return s.encodeArrayForObjectListItem("", v, depth, ctx)
+	case rawTabularSlice:
+		_, err := v.plan.appendRows(&s.buf, v.val, "", depth, s.cfg.indentSize, true)
+		return err
 	default:
 		return fmt.Errorf("toon: unsupported list item %T", v)
 	}
@@ -362,6 +380,21 @@ func (s *encodeState) encodeObjectListItem(obj Object, depth int, ctx formatCont
 		s.buf.WriteString(keyLiteral)
 		s.buf.WriteString(": ")
 		if err := s.buf.appendPrimitive(first.Value, ctx); err != nil {
+			return err
+		}
+		if len(obj.Fields) > 1 {
+			if err := s.encodeObject(Object{Fields: obj.Fields[1:]}, depth+1); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if raw, ok := first.Value.(rawTabularSlice); ok {
+		keyLiteral, err := encodeKey(first.Key)
+		if err != nil {
+			return err
+		}
+		if _, err := raw.plan.appendRows(&s.buf, raw.val, keyLiteral, depth, s.cfg.indentSize, true); err != nil {
 			return err
 		}
 		if len(obj.Fields) > 1 {

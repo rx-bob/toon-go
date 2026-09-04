@@ -31,6 +31,8 @@ func normalize(v any, cfg encoderOptions) (normalizedValue, error) {
 	}
 
 	switch val := v.(type) {
+	case rawTabularSlice:
+		return val, nil
 	case numberValue:
 		return val, nil
 	case string:
@@ -126,6 +128,21 @@ func normalize(v any, cfg encoderOptions) (normalizedValue, error) {
 	return nil, fmt.Errorf("toon: unsupported value of type %T", v)
 }
 
+func isEligibleTabularSlice(v reflect.Value, delim Delimiter) bool {
+	if v.Kind() != reflect.Slice && v.Kind() != reflect.Array {
+		return false
+	}
+	if v.Len() == 0 {
+		return false
+	}
+	elemType := v.Type().Elem()
+	if elemType.Kind() != reflect.Struct {
+		return false
+	}
+	plan := cachedTabularRowPlan(elemType, delim)
+	return plan.IsEligible()
+}
+
 func normalizeStructValue(val reflect.Value, cfg encoderOptions) (Object, error) {
 	meta := cachedStructMeta(val.Type())
 	if meta.err != nil {
@@ -137,9 +154,18 @@ func normalizeStructValue(val reflect.Value, cfg encoderOptions) (Object, error)
 		if field.omitEmpty && isEmptyValue(childValue) {
 			continue
 		}
-		child, err := normalize(childValue.Interface(), cfg)
-		if err != nil {
-			return Object{}, fmt.Errorf("toon: %s: %w", field.name, err)
+		var child normalizedValue
+		var err error
+		if isEligibleTabularSlice(childValue, cfg.delimiter) {
+			child = rawTabularSlice{
+				val:  childValue,
+				plan: cachedTabularRowPlan(childValue.Type().Elem(), cfg.delimiter),
+			}
+		} else {
+			child, err = normalize(childValue.Interface(), cfg)
+			if err != nil {
+				return Object{}, fmt.Errorf("toon: %s: %w", field.name, err)
+			}
 		}
 		fields = append(fields, Field{
 			Key:   field.name,
