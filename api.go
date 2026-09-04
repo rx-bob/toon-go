@@ -1,5 +1,6 @@
-// Package toon implements the Token-Oriented Object Notation (TOON)
-// encoder and decoder described in tests/spec/SPEC.md. TOON is a compact,
+// Package toon implements toon-spec 4.1 of the Token-Oriented Object Notation
+// (TOON) encoder and decoder described in tests/spec/SPEC.md. The tested
+// specification revision is v4.1.1. TOON is a compact,
 // human-readable serialization format targeting LLM workflows where predictable
 // structure and reduced token counts are important. The package exposes a small
 // public API while keeping implementation details inside internal packages.
@@ -66,6 +67,8 @@ func WithIndent(spaces int) EncoderOption {
 }
 
 // WithDocumentDelimiter is deprecated; use WithDelimiter.
+//
+// Deprecated: use WithDelimiter.
 func WithDocumentDelimiter(delimiter Delimiter) EncoderOption {
 	return codec.WithDocumentDelimiter(delimiter)
 }
@@ -76,12 +79,16 @@ func WithDelimiter(delimiter Delimiter) EncoderOption {
 }
 
 // WithArrayDelimiter is deprecated; use WithDelimiter.
+//
+// Deprecated: use WithDelimiter.
 func WithArrayDelimiter(delimiter Delimiter) EncoderOption {
 	return codec.WithArrayDelimiter(delimiter)
 }
 
 // WithLengthMarkers is deprecated and has no effect. v4.1 never emits legacy
 // # length markers.
+//
+// Deprecated: length markers are not part of toon-spec 4.1.
 func WithLengthMarkers(enabled bool) EncoderOption {
 	return codec.WithLengthMarkers(enabled)
 }

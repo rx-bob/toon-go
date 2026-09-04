@@ -6,6 +6,10 @@
 
 **Token-Oriented Object Notation** is a compact, human-readable format designed for passing structured data to Large Language Models with significantly reduced token usage.
 
+This implementation targets `toon-spec: 4.1` and is tested against the
+official specification and fixture revision `v4.1.1` (submodule commit
+`62f16b369408180f1faf1cba7da1b46d1f336f12`).
+
 ## Example
 
 **JSON** (verbose):
@@ -127,6 +131,13 @@ sets the delimiter for all emitted array scopes. `WithDocumentDelimiter`,
 `WithArrayDelimiter`, and `WithLengthMarkers` remain available only as
 deprecated compatibility aliases; length markers are ignored in v4.1.
 
+The supported public API is `Marshal`/`MarshalString`, `Unmarshal`/
+`UnmarshalString`, `Decode`/`DecodeString`, `NewEncoder`, `NewDecoder`,
+`Object`/`NewObject`, and the documented encoder and decoder options. Dynamic
+decoding uses `map[string]any`, `[]any`, `float64`, `string`, `bool`, and `nil`.
+Use `Object` when encoded field order must be preserved; Go maps are sorted
+for deterministic encoding and cannot preserve decode encounter order.
+
 ### Decoder safeguards
 
 The decoder rejects recursive input deeper than 64 structural levels and array
@@ -135,6 +146,23 @@ prevent stack exhaustion and excessive header work; they do not change the
 TOON format's logical nesting or document-size model. Declared array counts
 are validated but are never used to preallocate result storage, so a huge
 declared count with little input remains bounded by the input actually read.
+
+## Conformance checklist
+
+The release gate is defined in [`.github/workflows/tests.yml`](.github/workflows/tests.yml):
+
+- [ ] `go test ./... -count=1`
+- [ ] `go test -race ./... -count=1`
+- [ ] `go vet ./...` and clean `gofmt -l` output
+- [ ] `go test ./... -coverpkg=./...` reports implementation coverage
+- [ ] `go test ./tests -run '^TestSpec(Encode|Decode)Fixtures$' -count=1`
+- [ ] bounded fuzz targets in `tests/fuzz_test.go`
+- [ ] pinned reference corpus in `tests/differential`
+
+The conformance corpus is the v4.1.1 fixture revision above. Error wording,
+Go map encounter order, and values outside the shared JSON model are host
+implementation policy: callers should use `Object` for order and avoid
+treating `NaN`, infinities, or unsupported Go values as portable JSON data.
 
 ## Resources
 
