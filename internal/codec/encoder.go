@@ -128,7 +128,6 @@ func (s *encodeState) encodeObject(obj Object, depth int) error {
 			return nil
 		}
 	}
-	indent := s.indent(depth)
 	for _, field := range obj.Fields {
 		switch val := field.Value.(type) {
 		case nil, bool, string, numberValue:
@@ -157,7 +156,10 @@ func (s *encodeState) encodeObject(obj Object, depth int) error {
 			} else if ok {
 				continue
 			}
-			s.emit(indent + keyLiteral + ":")
+			s.startLine()
+			s.writeIndent(depth)
+			s.buf.WriteString(keyLiteral)
+			s.buf.WriteByte(':')
 			if err := s.encodeObject(val, depth+1); err != nil {
 				return err
 			}
@@ -173,7 +175,6 @@ func (s *encodeState) encodeObject(obj Object, depth int) error {
 }
 
 func (s *encodeState) encodeArray(key string, values []normalizedValue, depth int, root bool) error {
-	indent := s.indent(depth)
 	delimiter := s.cfg.delimiter
 	ctx := formatContext{
 		active:   delimiter,
@@ -192,17 +193,19 @@ func (s *encodeState) encodeArray(key string, values []normalizedValue, depth in
 
 	if isPrimitiveArray(values) {
 		if len(values) == 0 {
+			s.startLine()
+			s.writeIndent(depth)
 			if root {
-				s.emit(indent + "[]")
+				s.buf.WriteString("[]")
 			} else {
-				s.emit(indent + keyLiteral + ": []")
+				s.buf.WriteString(keyLiteral)
+				s.buf.WriteString(": []")
 			}
 			return nil
 		}
-		header := renderHeader(keyLiteral, len(values), delimiter, false, nil)
 		s.startLine()
 		s.writeIndent(depth)
-		s.buf.WriteString(header)
+		s.buf.appendHeader(keyLiteral, len(values), delimiter, nil)
 		if len(values) > 0 {
 			s.buf.WriteByte(' ')
 			delimRune := delimiter.rune()
@@ -219,8 +222,9 @@ func (s *encodeState) encodeArray(key string, values []normalizedValue, depth in
 	}
 
 	if fields, ok := detectTabular(values); ok {
-		header := renderHeader(keyLiteral, len(values), delimiter, false, fields)
-		s.emit(indent + header)
+		s.startLine()
+		s.writeIndent(depth)
+		s.buf.appendHeader(keyLiteral, len(values), delimiter, fields)
 		delimRune := delimiter.rune()
 		for _, row := range values {
 			obj := row.(Object)
@@ -238,8 +242,9 @@ func (s *encodeState) encodeArray(key string, values []normalizedValue, depth in
 		return nil
 	}
 
-	header := renderHeader(keyLiteral, len(values), delimiter, false, nil)
-	s.emit(indent + header)
+	s.startLine()
+	s.writeIndent(depth)
+	s.buf.appendHeader(keyLiteral, len(values), delimiter, nil)
 	for _, item := range values {
 		if root {
 			if err := s.encodeListItem(item, depth+1, ctx); err != nil {
@@ -294,7 +299,9 @@ func (s *encodeState) encodeListItem(item normalizedValue, depth int, ctx format
 
 func (s *encodeState) encodeObjectListItem(obj Object, depth int, ctx formatContext) error {
 	if obj.IsEmpty() {
-		s.emit(s.indent(depth) + "-")
+		s.startLine()
+		s.writeIndent(depth)
+		s.buf.WriteByte('-')
 		return nil
 	}
 	first := obj.Fields[0]
@@ -354,7 +361,11 @@ func (s *encodeState) encodeObjectListItem(obj Object, depth int, ctx formatCont
 		if err != nil {
 			return err
 		}
-		s.emit(s.indent(depth) + "- " + keyLiteral + ":")
+		s.startLine()
+		s.writeIndent(depth)
+		s.buf.WriteString("- ")
+		s.buf.WriteString(keyLiteral)
+		s.buf.WriteByte(':')
 		if err := s.encodeObject(nested, depth+2); err != nil {
 			return err
 		}
@@ -363,7 +374,9 @@ func (s *encodeState) encodeObjectListItem(obj Object, depth int, ctx formatCont
 		}
 		return nil
 	}
-	s.emit(s.indent(depth) + "-")
+	s.startLine()
+	s.writeIndent(depth)
+	s.buf.WriteByte('-')
 	return nil
 }
 
@@ -383,12 +396,12 @@ func (s *encodeState) encodeKeyedObject(obj Object, keyLiteral string, depth int
 	if !ok {
 		return false, nil
 	}
-	header := renderKeyedHeader(keyLiteral, len(entries), s.cfg.delimiter, fields)
+	s.startLine()
+	s.writeIndent(depth)
 	if listItem {
-		s.emit(s.indent(depth) + "- " + header)
-	} else {
-		s.emit(s.indent(depth) + header)
+		s.buf.WriteString("- ")
 	}
+	s.buf.appendKeyedHeader(keyLiteral, len(entries), s.cfg.delimiter, fields)
 	rowDepth := depth + 1
 	if listItem {
 		rowDepth++
@@ -423,15 +436,16 @@ func (s *encodeState) encodeKeyedObject(obj Object, keyLiteral string, depth int
 
 func (s *encodeState) encodeArrayForObjectListItem(keyLiteral string, values []normalizedValue, depth int, ctx formatContext) error {
 	delimiter := ctx.active
-	indent := s.indent(depth)
 
 	// Anonymous nested arrays use list form in a list-item position, even
 	// when their elements happen to be tabular-shaped. A fields-bearing
 	// header here would change the required §10 layout.
 	if keyLiteral != "" {
 		if fields, ok := detectTabular(values); ok {
-			header := renderHeader(keyLiteral, len(values), delimiter, false, fields)
-			s.emit(indent + "- " + header)
+			s.startLine()
+			s.writeIndent(depth)
+			s.buf.WriteString("- ")
+			s.buf.appendHeader(keyLiteral, len(values), delimiter, fields)
 			delimRune := delimiter.rune()
 			for _, row := range values {
 				obj := row.(Object)
@@ -452,18 +466,21 @@ func (s *encodeState) encodeArrayForObjectListItem(keyLiteral string, values []n
 
 	if isPrimitiveArray(values) {
 		if len(values) == 0 {
+			s.startLine()
+			s.writeIndent(depth)
+			s.buf.WriteString("- ")
 			if keyLiteral != "" {
-				s.emit(indent + "- " + keyLiteral + ": []")
+				s.buf.WriteString(keyLiteral)
+				s.buf.WriteString(": []")
 			} else {
-				s.emit(indent + "- [0]:")
+				s.buf.WriteString("[0]:")
 			}
 			return nil
 		}
-		header := renderHeader(keyLiteral, len(values), delimiter, false, nil)
 		s.startLine()
 		s.writeIndent(depth)
 		s.buf.WriteString("- ")
-		s.buf.WriteString(header)
+		s.buf.appendHeader(keyLiteral, len(values), delimiter, nil)
 		if len(values) > 0 {
 			s.buf.WriteByte(' ')
 			delimRune := delimiter.rune()
@@ -479,8 +496,10 @@ func (s *encodeState) encodeArrayForObjectListItem(keyLiteral string, values []n
 		return nil
 	}
 
-	header := renderHeader(keyLiteral, len(values), delimiter, false, nil)
-	s.emit(indent + "- " + header)
+	s.startLine()
+	s.writeIndent(depth)
+	s.buf.WriteString("- ")
+	s.buf.appendHeader(keyLiteral, len(values), delimiter, nil)
 	childDepth := depth + 1
 	if keyLiteral != "" {
 		childDepth++
@@ -632,13 +651,12 @@ func isPrimitiveArray(values []normalizedValue) bool {
 	return true
 }
 
-func renderHeader(keyLiteral string, length int, delimiter Delimiter, _ bool, fields []fieldNode) string {
-	var b strings.Builder
+func (b *encBuffer) appendHeader(keyLiteral string, length int, delimiter Delimiter, fields []fieldNode) {
 	if keyLiteral != "" {
 		b.WriteString(keyLiteral)
 	}
 	b.WriteByte('[')
-	b.WriteString(strconv.Itoa(length))
+	b.buf = strconv.AppendInt(b.buf, int64(length), 10)
 	if delimiter != DelimiterComma {
 		b.WriteRune(delimiter.rune())
 	}
@@ -649,25 +667,38 @@ func renderHeader(keyLiteral string, length int, delimiter Delimiter, _ bool, fi
 			if i > 0 {
 				b.WriteRune(delimiter.rune())
 			}
-			writeFieldNode(&b, field, delimiter)
+			b.appendFieldNode(field, delimiter)
 		}
 		b.WriteByte('}')
 	}
 	b.WriteByte(':')
-	return b.String()
 }
 
-func renderKeyedHeader(keyLiteral string, length int, delimiter Delimiter, fields []fieldNode) string {
-	header := renderHeader(keyLiteral, length, delimiter, false, fields)
-	open := strings.IndexByte(header, '[')
-	close := strings.IndexByte(header[open+1:], ']') + open + 1
-	if delimiter == DelimiterComma {
-		return header[:close] + ":" + header[close:]
+func (b *encBuffer) appendKeyedHeader(keyLiteral string, length int, delimiter Delimiter, fields []fieldNode) {
+	if keyLiteral != "" {
+		b.WriteString(keyLiteral)
 	}
-	return header[:close-1] + ":" + header[close-1:]
+	b.WriteByte('[')
+	b.buf = strconv.AppendInt(b.buf, int64(length), 10)
+	b.WriteByte(':')
+	if delimiter != DelimiterComma {
+		b.WriteRune(delimiter.rune())
+	}
+	b.WriteByte(']')
+	if len(fields) > 0 {
+		b.WriteByte('{')
+		for i, field := range fields {
+			if i > 0 {
+				b.WriteRune(delimiter.rune())
+			}
+			b.appendFieldNode(field, delimiter)
+		}
+		b.WriteByte('}')
+	}
+	b.WriteByte(':')
 }
 
-func writeFieldNode(b *strings.Builder, field fieldNode, delimiter Delimiter) {
+func (b *encBuffer) appendFieldNode(field fieldNode, delimiter Delimiter) {
 	fieldLiteral, _ := encodeKey(field.name)
 	b.WriteString(fieldLiteral)
 	if len(field.children) == 0 {
@@ -678,7 +709,19 @@ func writeFieldNode(b *strings.Builder, field fieldNode, delimiter Delimiter) {
 		if i > 0 {
 			b.WriteRune(delimiter.rune())
 		}
-		writeFieldNode(b, child, delimiter)
+		b.appendFieldNode(child, delimiter)
 	}
 	b.WriteByte('}')
+}
+
+func renderHeader(keyLiteral string, length int, delimiter Delimiter, _ bool, fields []fieldNode) string {
+	var b encBuffer
+	b.appendHeader(keyLiteral, length, delimiter, fields)
+	return b.String()
+}
+
+func renderKeyedHeader(keyLiteral string, length int, delimiter Delimiter, fields []fieldNode) string {
+	var b encBuffer
+	b.appendKeyedHeader(keyLiteral, length, delimiter, fields)
+	return b.String()
 }

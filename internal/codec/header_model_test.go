@@ -1,6 +1,9 @@
 package codec
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
 
 func TestTryParseHeaderBuildsRecursiveFieldTree(t *testing.T) {
 	header, ok, err := tryParseHeader(`orders[2]{id,customer{name,country},total}:`)
@@ -90,5 +93,121 @@ func TestTryParseHeaderRejectsFieldDelimiterMismatch(t *testing.T) {
 		if _, ok, err := tryParseHeader(input); ok || err == nil {
 			t.Errorf("tryParseHeader(%q) = ok %v, err %v; want delimiter error", input, ok, err)
 		}
+	}
+}
+
+func TestHeaderEmissionParity(t *testing.T) {
+	delimiters := []struct {
+		name  string
+		delim Delimiter
+	}{
+		{"comma", DelimiterComma},
+		{"tab", DelimiterTab},
+		{"pipe", DelimiterPipe},
+	}
+
+	keys := []string{"", "users", "items_list", "special:key", "with space"}
+	lengths := []int{0, 1, 15, 1000}
+
+	fieldStructures := []struct {
+		name   string
+		fields []fieldNode
+	}{
+		{"empty", nil},
+		{"flat", []fieldNode{{name: "id"}, {name: "name"}, {name: "score"}}},
+		{"nested_single", []fieldNode{
+			{name: "id"},
+			{name: "user", children: []fieldNode{{name: "name"}, {name: "email"}}},
+			{name: "total"},
+		}},
+		{"nested_multi_level", []fieldNode{
+			{name: "id"},
+			{name: "customer", children: []fieldNode{
+				{name: "name"},
+				{name: "address", children: []fieldNode{{name: "city"}, {name: "country"}}},
+			}},
+			{name: "status"},
+		}},
+		{"quoted_fields", []fieldNode{
+			{name: "user id"},
+			{name: "field:with:colon"},
+		}},
+	}
+
+	for _, d := range delimiters {
+		for _, key := range keys {
+			for _, length := range lengths {
+				for _, fs := range fieldStructures {
+					testName := fmt.Sprintf("Header_%s_key=%q_len=%d_fields=%s", d.name, key, length, fs.name)
+					t.Run(testName, func(t *testing.T) {
+						var keyLiteral string
+						if key != "" {
+							lit, _ := encodeKey(key)
+							keyLiteral = lit
+						}
+
+						want := renderHeader(keyLiteral, length, d.delim, false, fs.fields)
+
+						var buf encBuffer
+						buf.appendHeader(keyLiteral, length, d.delim, fs.fields)
+						got := buf.String()
+
+						if got != want {
+							t.Fatalf("appendHeader mismatch:\ngot:  %q\nwant: %q", got, want)
+						}
+					})
+
+					// Keyed header parity (only applicable when fields are present)
+					if len(fs.fields) > 0 {
+						keyedName := fmt.Sprintf("KeyedHeader_%s_key=%q_len=%d_fields=%s", d.name, key, length, fs.name)
+						t.Run(keyedName, func(t *testing.T) {
+							var keyLiteral string
+							if key != "" {
+								lit, _ := encodeKey(key)
+								keyLiteral = lit
+							}
+
+							want := renderKeyedHeader(keyLiteral, length, d.delim, fs.fields)
+
+							var buf encBuffer
+							buf.appendKeyedHeader(keyLiteral, length, d.delim, fs.fields)
+							got := buf.String()
+
+							if got != want {
+								t.Fatalf("appendKeyedHeader mismatch:\ngot:  %q\nwant: %q", got, want)
+							}
+						})
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestHeaderEmissionZeroAlloc(t *testing.T) {
+	fields := []fieldNode{
+		{name: "id"},
+		{name: "name"},
+		{name: "email"},
+		{name: "active"},
+		{name: "score"},
+	}
+
+	buf := newEncBuffer(512)
+
+	allocs := testing.AllocsPerRun(1000, func() {
+		buf.Reset()
+		buf.appendHeader("users", 1000, DelimiterComma, fields)
+	})
+	if allocs != 0 {
+		t.Errorf("appendHeader allocated %f times, want 0", allocs)
+	}
+
+	keyedAllocs := testing.AllocsPerRun(1000, func() {
+		buf.Reset()
+		buf.appendKeyedHeader("users", 1000, DelimiterComma, fields)
+	})
+	if keyedAllocs != 0 {
+		t.Errorf("appendKeyedHeader allocated %f times, want 0", keyedAllocs)
 	}
 }
