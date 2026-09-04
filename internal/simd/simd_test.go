@@ -1225,3 +1225,57 @@ func TestComputeIndentSWAR(t *testing.T) {
 		}
 	}
 }
+
+func TestAVX2LineAndIndentDifferential(t *testing.T) {
+	tests := []string{
+		"",
+		strings.Repeat("a", 31) + "\n",
+		strings.Repeat("a", 31) + "\r\nend",
+		strings.Repeat("a", 32) + "\r\nend",
+		strings.Repeat("a", 33) + "\nend",
+		"first\rsecond\nthird\r\nfourth",
+	}
+	for _, input := range tests {
+		want := ScanLinesSWAR([]byte(input), nil)
+		got := ScanLinesAVX2([]byte(input), nil)
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("ScanLinesAVX2(%q) = %v, want %v", input, got, want)
+		}
+	}
+
+	for _, n := range []int{0, 1, 7, 31, 32, 33, 63, 64, 65, 96} {
+		input := strings.Repeat(" ", n) + "\tvalue"
+		want := LeadingSpacesSWAR([]byte(input))
+		if got := LeadingSpacesAVX2([]byte(input)); got != want {
+			t.Errorf("LeadingSpacesAVX2(%d spaces) = %d, want %d", n, got, want)
+		}
+		if got := ComputeIndentAVX2([]byte(input)); got != want {
+			t.Errorf("ComputeIndentAVX2(%d spaces) = %d, want %d", n, got, want)
+		}
+	}
+
+	rng := rand.New(rand.NewSource(20260904))
+	for iter := 0; iter < 10000; iter++ {
+		data := make([]byte, rng.Intn(160))
+		for i := range data {
+			switch rng.Intn(16) {
+			case 0:
+				data[i] = '\n'
+			case 1:
+				data[i] = '\r'
+			case 2:
+				data[i] = ' '
+			default:
+				data[i] = byte('a' + rng.Intn(26))
+			}
+		}
+		wantLines := ScanLinesSWAR(data, nil)
+		if gotLines := ScanLinesAVX2(data, nil); !reflect.DeepEqual(gotLines, wantLines) {
+			t.Fatalf("iteration %d: ScanLinesAVX2(%q) = %v, want %v", iter, data, gotLines, wantLines)
+		}
+		wantIndent := LeadingSpacesSWAR(data)
+		if gotIndent := LeadingSpacesAVX2(data); gotIndent != wantIndent {
+			t.Fatalf("iteration %d: LeadingSpacesAVX2(%q) = %d, want %d", iter, data, gotIndent, wantIndent)
+		}
+	}
+}
