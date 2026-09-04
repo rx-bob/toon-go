@@ -55,6 +55,16 @@ func ScanDelimAuto(data []byte, delim byte) int {
 	return ScanDelim(data, delim, SelectBestAlgorithm())
 }
 
+// FindDelimsAuto finds all unquoted occurrences of delim in data using the optimal algorithm for the host CPU.
+func FindDelimsAuto(data []byte, delim byte, dst []int) ([]int, bool) {
+	return FindDelimsSWAR(data, delim, dst)
+}
+
+// IndexUnquotedAuto returns the index of the first unquoted occurrence of delim in data.
+func IndexUnquotedAuto(data []byte, delim byte) int {
+	return IndexUnquotedSWAR(data, delim)
+}
+
 // ScanDelim dispatches delimiter scanning to the requested algorithm.
 func ScanDelim(data []byte, delim byte, algo Algorithm) int {
 	switch algo {
@@ -100,77 +110,7 @@ func hasByte64(w uint64, b byte) uint64 {
 
 // ScanDelimSWAR counts unquoted occurrences of delim using 64-bit SWAR word scanning.
 func ScanDelimSWAR(data []byte, delim byte) int {
-	count := 0
-	inQuotes := false
-	i := 0
-	n := len(data)
-
-	for i+8 <= n {
-		if inQuotes {
-			b := data[i]
-			if b == '\\' {
-				i += 2
-				continue
-			}
-			if b == '"' {
-				inQuotes = false
-			}
-			i++
-			continue
-		}
-
-		w := binary.LittleEndian.Uint64(data[i:])
-		hasQuote := hasByte64(w, '"')
-		hasBackslash := hasByte64(w, '\\')
-
-		if (hasQuote | hasBackslash) == 0 {
-			delims := hasByte64(w, delim)
-			if delims != 0 {
-				count += bits.OnesCount64(delims)
-			}
-			i += 8
-			continue
-		}
-
-		// Process scalar within word boundary when quotes/escapes are present.
-		limit := i + 8
-		for i < limit {
-			b := data[i]
-			if b == '\\' && inQuotes {
-				i += 2
-				continue
-			}
-			if b == '"' {
-				inQuotes = !inQuotes
-				i++
-				continue
-			}
-			if b == delim && !inQuotes {
-				count++
-			}
-			i++
-		}
-	}
-
-	// Remainder tail
-	for i < n {
-		b := data[i]
-		if b == '\\' && inQuotes {
-			i += 2
-			continue
-		}
-		if b == '"' {
-			inQuotes = !inQuotes
-			i++
-			continue
-		}
-		if b == delim && !inQuotes {
-			count++
-		}
-		i++
-	}
-
-	return count
+	return CountDelimsSWAR(data, delim)
 }
 
 // ScanDelimAVX2 counts unquoted occurrences of delim using a 32-byte vector stride.
