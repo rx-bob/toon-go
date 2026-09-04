@@ -35,6 +35,13 @@ type numberValue struct {
 	literal string
 }
 
+// decodedNumber retains source precision for typed unmarshalling while the
+// public Decode path can still expose its historical float64 representation.
+type decodedNumber struct {
+	literal string
+	value   float64
+}
+
 // maxSafeInteger mirrors JavaScript's Number.MAX_SAFE_INTEGER, the threshold at
 // which IEEE 754 double precision can no longer represent integers exactly.
 const maxSafeInteger = 9007199254740991

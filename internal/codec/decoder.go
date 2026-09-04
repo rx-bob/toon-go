@@ -44,12 +44,33 @@ func (d *Decoder) Decode(data []byte) (any, error) {
 	return value, nil
 }
 
+func (d *Decoder) decodeForUnmarshal(data []byte) (any, error) {
+	if d.cfg.strict && !utf8.Valid(data) {
+		return nil, errors.New("toon: input is not valid UTF-8")
+	}
+	parser, err := newParser(string(data), d.cfg)
+	if err != nil {
+		return nil, err
+	}
+	parser.preserveNumbers = true
+	return parser.parseDocument()
+}
+
 // DecodeString is a convenience wrapper around Decode.
 func (d *Decoder) DecodeString(doc string) (any, error) {
 	parser, err := newParser(doc, d.cfg)
 	if err != nil {
 		return nil, err
 	}
+	return parser.parseDocument()
+}
+
+func (d *Decoder) decodeStringForUnmarshal(doc string) (any, error) {
+	parser, err := newParser(doc, d.cfg)
+	if err != nil {
+		return nil, err
+	}
+	parser.preserveNumbers = true
 	return parser.parseDocument()
 }
 
@@ -64,9 +85,10 @@ func DecodeString(s string, opts ...DecoderOption) (any, error) {
 }
 
 type parser struct {
-	lines []parsedLine
-	pos   int
-	cfg   decoderOptions
+	lines           []parsedLine
+	pos             int
+	cfg             decoderOptions
+	preserveNumbers bool
 }
 
 type parsedLine struct {
@@ -194,7 +216,7 @@ func (p *parser) parseDocument() (any, error) {
 
 	if nonBlank == 1 && first.indent == 0 && !ok && !isKeyValue(first.content) {
 		token := trimSpaces(first.content)
-		value, err := decodePrimitiveToken(token)
+		value, err := p.decodePrimitiveToken(token)
 		if err != nil {
 			return nil, errorWrap(first.number, err)
 		}
@@ -301,7 +323,7 @@ func (p *parser) parseObject(depth int) (map[string]any, error) {
 		if rest == "[]" {
 			value = []any{}
 		} else {
-			value, err = decodePrimitiveToken(rest)
+			value, err = p.decodePrimitiveToken(rest)
 			if err != nil {
 				return nil, errorWrap(line.number, err)
 			}
@@ -333,7 +355,7 @@ func (p *parser) parseArray(header parsedHeader, depth int) (any, error) {
 			return nil, errorWrap(p.lines[p.pos-1].number, err)
 		}
 		for _, token := range raw {
-			value, err := decodePrimitiveToken(token)
+			value, err := p.decodePrimitiveToken(token)
 			if err != nil {
 				return nil, errorWrap(p.lines[p.pos-1].number, err)
 			}
@@ -495,7 +517,7 @@ func (p *parser) parseArray(header parsedHeader, depth int) (any, error) {
 				values = append(values, map[string]any{key: obj})
 				continue
 			}
-			val, err := decodePrimitiveToken(rest)
+			val, err := p.decodePrimitiveToken(rest)
 			if err != nil {
 				return nil, errorWrap(line.number, err)
 			}
@@ -507,7 +529,7 @@ func (p *parser) parseArray(header parsedHeader, depth int) (any, error) {
 			continue
 		}
 
-		value, err := decodePrimitiveToken(itemContent)
+		value, err := p.decodePrimitiveToken(itemContent)
 		if err != nil {
 			return nil, errorWrap(line.number, err)
 		}
@@ -635,6 +657,21 @@ func (p *parser) current() parsedLine {
 	return p.lines[p.pos]
 }
 
+func (p *parser) decodePrimitiveToken(token string) (any, error) {
+	value, err := decodePrimitiveToken(token)
+	if err != nil || !p.preserveNumbers || !jsonNumberLexeme.MatchString(token) || hasNumberLeadingZeros(token) {
+		return value, err
+	}
+	if number, ok := value.(float64); ok {
+		return decodedNumber{literal: token, value: number}, nil
+	}
+	if _, ok := value.(string); ok {
+		number, _ := strconv.ParseFloat(token, 64)
+		return decodedNumber{literal: token, value: number}, nil
+	}
+	return value, nil
+}
+
 func (p *parser) skipBlankLinesOutsideArrays() {
 	for p.pos < len(p.lines) {
 		if !p.lines[p.pos].blank {
@@ -725,7 +762,7 @@ func (p *parser) collectObjectListSiblings(obj map[string]any, depth int) error 
 			if rest == "[]" {
 				value = []any{}
 			} else {
-				value, err = decodePrimitiveToken(rest)
+				value, err = p.decodePrimitiveToken(rest)
 				if err != nil {
 					return errorWrap(next.number, err)
 				}
