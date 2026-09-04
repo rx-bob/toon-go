@@ -282,3 +282,154 @@ func CountDelimsSWARWithState(data []byte, delim byte, inQuotesIn bool, escapedI
 
 	return count, inQuotes, escaped
 }
+
+const (
+	maskSlash  = uint64('\\') * 0x0101010101010101
+	maskColon  = uint64(':') * 0x0101010101010101
+	maskQuote  = uint64('"') * 0x0101010101010101
+	maskLBrack = uint64('[') * 0x0101010101010101
+	maskLBrace = uint64('{') * 0x0101010101010101
+	maskRBrace = uint64('}') * 0x0101010101010101
+)
+
+// hasControl64 returns a bitmask with bit 7 set for each byte in w that is < 0x20.
+// For any byte b, b < 0x20 iff bits 5, 6, 7 are all 0.
+func hasControl64(w uint64) uint64 {
+	t := ((w & 0x6060606060606060) + 0x7f7f7f7f7f7f7f7f) | w
+	return ^t & 0x8080808080808080
+}
+
+// hasEscapeOrControl64 returns a bitmask with bit 7 set for each byte in w
+// that is either a control character (< 0x20) or a backslash ('\\').
+func hasEscapeOrControl64(w uint64) uint64 {
+	return hasControl64(w) | hasByte64Mask(w, maskSlash)
+}
+
+// hasSpecialOrControl64 returns a bitmask with bit 7 set for each byte in w
+// that is a control character (< 0x20), a TOON structural character
+// (':', '\\', '"', '[', ']', '{', '}'), or matches delim (if delim != 0).
+func hasSpecialOrControl64(w uint64, delim byte) uint64 {
+	m := hasControl64(w)
+	m |= hasByte64Mask(w, maskColon)
+	m |= hasByte64Mask(w, maskQuote)
+	m |= hasByte64Mask(w, maskLBrack)
+	m |= hasByte64Mask(w&0xfefefefefefefefe, maskSlash) // matches '\\' (0x5C) and ']' (0x5D)
+	m |= hasByte64Mask(w, maskLBrace)
+	m |= hasByte64Mask(w, maskRBrace)
+	if delim != 0 {
+		m |= hasByte64(w, delim)
+	}
+	return m
+}
+
+// HasEscapeOrControlSWAR reports whether data contains any escape character ('\\')
+// or control character (< 0x20) using 64-bit SWAR word scanning.
+func HasEscapeOrControlSWAR(data []byte) bool {
+	n := len(data)
+	i := 0
+	for i+8 <= n {
+		w := binary.LittleEndian.Uint64(data[i:])
+		if hasEscapeOrControl64(w) != 0 {
+			return true
+		}
+		i += 8
+	}
+	for i < n {
+		b := data[i]
+		if b < 0x20 || b == '\\' {
+			return true
+		}
+		i++
+	}
+	return false
+}
+
+// IndexEscapeOrControlSWAR returns the index of the first byte in data that is
+// an escape character ('\\') or a control character (< 0x20), or -1 if none found.
+func IndexEscapeOrControlSWAR(data []byte) int {
+	n := len(data)
+	i := 0
+	for i+8 <= n {
+		w := binary.LittleEndian.Uint64(data[i:])
+		m := hasEscapeOrControl64(w)
+		if m != 0 {
+			tz := bits.TrailingZeros64(m)
+			return i + (tz >> 3)
+		}
+		i += 8
+	}
+	for i < n {
+		b := data[i]
+		if b < 0x20 || b == '\\' {
+			return i
+		}
+		i++
+	}
+	return -1
+}
+
+// HasSpecialOrControlSWAR reports whether data contains any control character (< 0x20),
+// TOON structural character (':', '\\', '"', '[', ']', '{', '}'), or delim (if delim != 0)
+// using 64-bit SWAR word scanning.
+func HasSpecialOrControlSWAR(data []byte, delim byte) bool {
+	n := len(data)
+	i := 0
+	for i+8 <= n {
+		w := binary.LittleEndian.Uint64(data[i:])
+		if hasSpecialOrControl64(w, delim) != 0 {
+			return true
+		}
+		i += 8
+	}
+	for i < n {
+		b := data[i]
+		if b < 0x20 {
+			return true
+		}
+		switch b {
+		case ':', '\\', '"', '[', ']', '{', '}':
+			return true
+		}
+		if delim != 0 && b == delim {
+			return true
+		}
+		i++
+	}
+	return false
+}
+
+// IndexSpecialOrControlSWAR returns the index of the first special, control, or delim byte,
+// or -1 if none found.
+func IndexSpecialOrControlSWAR(data []byte, delim byte) int {
+	n := len(data)
+	i := 0
+	for i+8 <= n {
+		w := binary.LittleEndian.Uint64(data[i:])
+		m := hasSpecialOrControl64(w, delim)
+		if m != 0 {
+			tz := bits.TrailingZeros64(m)
+			return i + (tz >> 3)
+		}
+		i += 8
+	}
+	for i < n {
+		b := data[i]
+		if b < 0x20 {
+			return i
+		}
+		switch b {
+		case ':', '\\', '"', '[', ']', '{', '}':
+			return i
+		}
+		if delim != 0 && b == delim {
+			return i
+		}
+		i++
+	}
+	return -1
+}
+
+// NeedsQuotingSWAR reports whether data contains characters that require quoting in TOON.
+func NeedsQuotingSWAR(data []byte, delim byte) bool {
+	return HasSpecialOrControlSWAR(data, delim)
+}

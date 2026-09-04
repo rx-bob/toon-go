@@ -676,5 +676,218 @@ func TestNEON_AlignedAndUnalignedBuffers(t *testing.T) {
 	}
 }
 
+func TestSWAR_Classifier_AllASCII(t *testing.T) {
+	delims := []byte{',', '\t', '|', ';', 0}
 
+	for b := 0; b < 128; b++ {
+		ch := byte(b)
+		single := []byte{ch}
 
+		// Test single byte
+		wantEscape := HasEscapeOrControlScalar(single)
+		gotEscape := HasEscapeOrControlSWAR(single)
+		if wantEscape != gotEscape {
+			t.Fatalf("ASCII 0x%02X (%q) HasEscapeOrControl: got %v, want %v", ch, ch, gotEscape, wantEscape)
+		}
+
+		wantEscapeIdx := IndexEscapeOrControlScalar(single)
+		gotEscapeIdx := IndexEscapeOrControlSWAR(single)
+		if wantEscapeIdx != gotEscapeIdx {
+			t.Fatalf("ASCII 0x%02X (%q) IndexEscapeOrControl: got %d, want %d", ch, ch, gotEscapeIdx, wantEscapeIdx)
+		}
+
+		for _, delim := range delims {
+			wantSpecial := HasSpecialOrControlScalar(single, delim)
+			gotSpecial := HasSpecialOrControlSWAR(single, delim)
+			if wantSpecial != gotSpecial {
+				t.Fatalf("ASCII 0x%02X (%q) HasSpecialOrControl (delim %q): got %v, want %v", ch, ch, delim, gotSpecial, wantSpecial)
+			}
+
+			wantSpecialIdx := IndexSpecialOrControlScalar(single, delim)
+			gotSpecialIdx := IndexSpecialOrControlSWAR(single, delim)
+			if wantSpecialIdx != gotSpecialIdx {
+				t.Fatalf("ASCII 0x%02X (%q) IndexSpecialOrControl (delim %q): got %d, want %d", ch, ch, delim, gotSpecialIdx, wantSpecialIdx)
+			}
+		}
+
+		// Test embedded in various buffer lengths and positions (8, 9, 15, 16, 23, 32, 64)
+		testSizes := []int{8, 9, 15, 16, 23, 32, 64}
+		for _, size := range testSizes {
+			positions := []int{0, 1, 7, size / 2, size - 1}
+			for _, pos := range positions {
+				buf := bytes.Repeat([]byte("a"), size)
+				buf[pos] = ch
+
+				wantEsc := HasEscapeOrControlScalar(buf)
+				gotEsc := HasEscapeOrControlSWAR(buf)
+				if wantEsc != gotEsc {
+					t.Fatalf("size %d pos %d ASCII 0x%02X (%q) HasEscapeOrControl: got %v, want %v", size, pos, ch, ch, gotEsc, wantEsc)
+				}
+				wantEscIdx := IndexEscapeOrControlScalar(buf)
+				gotEscIdx := IndexEscapeOrControlSWAR(buf)
+				if wantEscIdx != gotEscIdx {
+					t.Fatalf("size %d pos %d ASCII 0x%02X (%q) IndexEscapeOrControl: got %d, want %d", size, pos, ch, ch, gotEscIdx, wantEscIdx)
+				}
+
+				for _, delim := range delims {
+					wantSpec := HasSpecialOrControlScalar(buf, delim)
+					gotSpec := HasSpecialOrControlSWAR(buf, delim)
+					if wantSpec != gotSpec {
+						t.Fatalf("size %d pos %d ASCII 0x%02X (%q) HasSpecialOrControl (delim %q): got %v, want %v", size, pos, ch, ch, delim, gotSpec, wantSpec)
+					}
+					wantSpecIdx := IndexSpecialOrControlScalar(buf, delim)
+					gotSpecIdx := IndexSpecialOrControlSWAR(buf, delim)
+					if wantSpecIdx != gotSpecIdx {
+						t.Fatalf("size %d pos %d ASCII 0x%02X (%q) IndexSpecialOrControl (delim %q): got %d, want %d", size, pos, ch, ch, delim, gotSpecIdx, wantSpecIdx)
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestSWAR_Classifier_UTF8Sequences(t *testing.T) {
+	cleanUTF8Strings := []string{
+		"Hello World",
+		"café crème brûlée",
+		"日本語のテスト文字列です",
+		"你好世界，这是一个测试",
+		"안녕하세요 반갑습니다",
+		"Привет мир и вселенная",
+		"Γειά σου κόσμε όμορφε",
+		"🚀🌟🎉🔥🤖📦🔧💡",
+		"Mixed english and 中文 and emoji 🚀 works seamlessly",
+	}
+
+	for _, s := range cleanUTF8Strings {
+		data := []byte(s)
+
+		if HasEscapeOrControlSWAR(data) {
+			t.Fatalf("clean UTF-8 string %q falsely flagged by HasEscapeOrControlSWAR", s)
+		}
+		if HasSpecialOrControlSWAR(data, ',') {
+			t.Fatalf("clean UTF-8 string %q falsely flagged by HasSpecialOrControlSWAR with comma delim", s)
+		}
+		if NeedsQuotingSWAR(data, 0) {
+			t.Fatalf("clean UTF-8 string %q falsely flagged by NeedsQuotingSWAR", s)
+		}
+
+		// Inject special structural characters and verify detection
+		specials := []byte{':', '\\', '"', '[', ']', '{', '}', '\n', '\t', '\x00'}
+		for _, sp := range specials {
+			for pos := 0; pos <= len(data); pos++ {
+				modified := make([]byte, 0, len(data)+1)
+				modified = append(modified, data[:pos]...)
+				modified = append(modified, sp)
+				modified = append(modified, data[pos:]...)
+
+				if !HasSpecialOrControlSWAR(modified, 0) {
+					t.Fatalf("failed to detect special 0x%02X in UTF-8 string at pos %d: %q", sp, pos, modified)
+				}
+				idx := IndexSpecialOrControlSWAR(modified, 0)
+				wantIdx := IndexSpecialOrControlScalar(modified, 0)
+				if idx != wantIdx {
+					t.Fatalf("special 0x%02X pos mismatch: got %d, want %d", sp, idx, wantIdx)
+				}
+			}
+		}
+	}
+
+	// Verify all byte values in 0x80..0xFF (continuation and lead bytes) never trigger false positives
+	for b := 0x80; b <= 0xFF; b++ {
+		ch := byte(b)
+		buf := make([]byte, 64)
+		for i := range buf {
+			buf[i] = ch
+		}
+
+		if HasEscapeOrControlSWAR(buf) {
+			t.Fatalf("byte 0x%02X falsely flagged by HasEscapeOrControlSWAR", ch)
+		}
+		if HasSpecialOrControlSWAR(buf, ',') {
+			t.Fatalf("byte 0x%02X falsely flagged by HasSpecialOrControlSWAR", ch)
+		}
+	}
+}
+
+func TestSWAR_Classifier_DifferentialFuzz(t *testing.T) {
+	rng := rand.New(rand.NewSource(42))
+	charset := []byte("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-. :/\\\"[]{} \t\r\n\x00\x01\x1F\x7F")
+	// Add multi-byte UTF-8 bytes
+	utf8Bytes := []byte("世é🚀")
+	charset = append(charset, utf8Bytes...)
+
+	delims := []byte{',', '\t', '|', ';', ':', 0}
+
+	for iter := 0; iter < 5000; iter++ {
+		length := rng.Intn(130)
+		buf := make([]byte, length)
+		for i := range buf {
+			buf[i] = charset[rng.Intn(len(charset))]
+		}
+		delim := delims[rng.Intn(len(delims))]
+
+		wantEsc := HasEscapeOrControlScalar(buf)
+		gotEsc := HasEscapeOrControlSWAR(buf)
+		if wantEsc != gotEsc {
+			t.Fatalf("iter %d: HasEscapeOrControl mismatch: got %v, want %v, buf=%q", iter, gotEsc, wantEsc, buf)
+		}
+
+		wantEscIdx := IndexEscapeOrControlScalar(buf)
+		gotEscIdx := IndexEscapeOrControlSWAR(buf)
+		if wantEscIdx != gotEscIdx {
+			t.Fatalf("iter %d: IndexEscapeOrControl mismatch: got %d, want %d, buf=%q", iter, gotEscIdx, wantEscIdx, buf)
+		}
+
+		wantSpec := HasSpecialOrControlScalar(buf, delim)
+		gotSpec := HasSpecialOrControlSWAR(buf, delim)
+		if wantSpec != gotSpec {
+			t.Fatalf("iter %d: HasSpecialOrControl mismatch (delim %q): got %v, want %v, buf=%q", iter, delim, gotSpec, wantSpec, buf)
+		}
+
+		wantSpecIdx := IndexSpecialOrControlScalar(buf, delim)
+		gotSpecIdx := IndexSpecialOrControlSWAR(buf, delim)
+		if wantSpecIdx != gotSpecIdx {
+			t.Fatalf("iter %d: IndexSpecialOrControl mismatch (delim %q): got %d, want %d, buf=%q", iter, delim, gotSpecIdx, wantSpecIdx, buf)
+		}
+	}
+}
+
+func BenchmarkCharacterClassification(b *testing.B) {
+	sizes := []int{16, 64, 512, 4096}
+	for _, size := range sizes {
+		clean := bytes.Repeat([]byte("AlphaNumericValue12345_Test"), (size/27)+1)[:size]
+
+		b.Run(fmt.Sprintf("NeedsQuoting_Scalar_%dB", size), func(b *testing.B) {
+			b.SetBytes(int64(size))
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				_ = NeedsQuotingScalar(clean, ',')
+			}
+		})
+
+		b.Run(fmt.Sprintf("NeedsQuoting_SWAR_%dB", size), func(b *testing.B) {
+			b.SetBytes(int64(size))
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				_ = NeedsQuotingSWAR(clean, ',')
+			}
+		})
+
+		b.Run(fmt.Sprintf("HasEscapeOrControl_Scalar_%dB", size), func(b *testing.B) {
+			b.SetBytes(int64(size))
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				_ = HasEscapeOrControlScalar(clean)
+			}
+		})
+
+		b.Run(fmt.Sprintf("HasEscapeOrControl_SWAR_%dB", size), func(b *testing.B) {
+			b.SetBytes(int64(size))
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				_ = HasEscapeOrControlSWAR(clean)
+			}
+		})
+	}
+}

@@ -103,10 +103,89 @@ func ScanDelimScalar(data []byte, delim byte) int {
 	return count
 }
 
-func hasByte64(w uint64, b byte) uint64 {
-	mask := uint64(b) * 0x0101010101010101
+func hasByte64Mask(w, mask uint64) uint64 {
 	v := w ^ mask
 	return ^(((v & 0x7f7f7f7f7f7f7f7f) + 0x7f7f7f7f7f7f7f7f) | v) & 0x8080808080808080
+}
+
+func hasByte64(w uint64, b byte) uint64 {
+	return hasByte64Mask(w, uint64(b)*0x0101010101010101)
+}
+
+// HasEscapeOrControlAuto reports whether data contains an escape character ('\\')
+// or control character (< 0x20) using the optimal implementation for the host CPU.
+func HasEscapeOrControlAuto(data []byte) bool {
+	return HasEscapeOrControlSWAR(data)
+}
+
+// HasSpecialOrControlAuto reports whether data contains a special or control character
+// using the optimal implementation for the host CPU.
+func HasSpecialOrControlAuto(data []byte, delim byte) bool {
+	return HasSpecialOrControlSWAR(data, delim)
+}
+
+// NeedsQuotingAuto reports whether data contains characters that require quoting in TOON.
+func NeedsQuotingAuto(data []byte, delim byte) bool {
+	return HasSpecialOrControlAuto(data, delim)
+}
+
+// HasEscapeOrControlScalar reports whether data contains '\\' or < 0x20 using a scalar loop.
+func HasEscapeOrControlScalar(data []byte) bool {
+	for _, b := range data {
+		if b < 0x20 || b == '\\' {
+			return true
+		}
+	}
+	return false
+}
+
+// IndexEscapeOrControlScalar returns the byte index of the first '\\' or < 0x20 character, or -1.
+func IndexEscapeOrControlScalar(data []byte) int {
+	for i, b := range data {
+		if b < 0x20 || b == '\\' {
+			return i
+		}
+	}
+	return -1
+}
+
+// HasSpecialOrControlScalar reports whether data contains special/control chars or delim using a scalar loop.
+func HasSpecialOrControlScalar(data []byte, delim byte) bool {
+	for _, b := range data {
+		if b < 0x20 {
+			return true
+		}
+		switch b {
+		case ':', '\\', '"', '[', ']', '{', '}':
+			return true
+		}
+		if delim != 0 && b == delim {
+			return true
+		}
+	}
+	return false
+}
+
+// IndexSpecialOrControlScalar returns the byte index of the first special, control, or delim byte, or -1.
+func IndexSpecialOrControlScalar(data []byte, delim byte) int {
+	for i, b := range data {
+		if b < 0x20 {
+			return i
+		}
+		switch b {
+		case ':', '\\', '"', '[', ']', '{', '}':
+			return i
+		}
+		if delim != 0 && b == delim {
+			return i
+		}
+	}
+	return -1
+}
+
+// NeedsQuotingScalar reports whether data contains quoting characters using a scalar loop.
+func NeedsQuotingScalar(data []byte, delim byte) bool {
+	return HasSpecialOrControlScalar(data, delim)
 }
 
 // ScanDelimSWAR counts unquoted occurrences of delim using 64-bit SWAR word scanning.

@@ -177,4 +177,5 @@ treating `NaN`, infinities, or unsupported Go values as portable JSON data.
 ## License
 
 MIT License © 2025-PRESENT [Johann Schopplich](https://github.com/johannschopplich) for the original toon-format/toon-go
+
 MIT License © 2026-PRESENT [Bob](https://github.com/rx-bob) for this very fork
