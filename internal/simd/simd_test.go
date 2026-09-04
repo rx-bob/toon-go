@@ -6,6 +6,8 @@ import (
 	"math/rand"
 	"strings"
 	"testing"
+
+	"github.com/toon-format/toon-go/internal/format"
 )
 
 func TestCPUFeatures_Queries(t *testing.T) {
@@ -889,5 +891,178 @@ func BenchmarkCharacterClassification(b *testing.B) {
 				_ = HasEscapeOrControlSWAR(clean)
 			}
 		})
+
+		b.Run(fmt.Sprintf("NeedsQuoting_AVX2_%dB", size), func(b *testing.B) {
+			b.SetBytes(int64(size))
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				_ = NeedsQuotingAVX2(clean, ',')
+			}
+		})
+
+		b.Run(fmt.Sprintf("HasEscapeOrControl_AVX2_%dB", size), func(b *testing.B) {
+			b.SetBytes(int64(size))
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				_ = HasEscapeOrControlAVX2(clean)
+			}
+		})
+	}
+}
+
+func TestAVX2_Classifier_FallbackOnSimulatedDisabled(t *testing.T) {
+	restore := SetCPUFeaturesForTest(CPUFeatures{HasAVX2: false, HasBMI2: false, HasNEON: false})
+	defer restore()
+
+	inputs := []string{
+		"plain_simple_text",
+		"users[2]{id,name}:",
+		"line\nbreak",
+		"tab\tseparated",
+		`escaped\"quote`,
+		"unicode: 你好世界 🚀",
+	}
+
+	for _, s := range inputs {
+		data := []byte(s)
+
+		gotEsc := HasEscapeOrControlAVX2(data)
+		wantEsc := HasEscapeOrControlSWAR(data)
+		if gotEsc != wantEsc {
+			t.Fatalf("input %q: HasEscapeOrControlAVX2 = %v, want %v", s, gotEsc, wantEsc)
+		}
+
+		gotEscIdx := IndexEscapeOrControlAVX2(data)
+		wantEscIdx := IndexEscapeOrControlSWAR(data)
+		if gotEscIdx != wantEscIdx {
+			t.Fatalf("input %q: IndexEscapeOrControlAVX2 = %d, want %d", s, gotEscIdx, wantEscIdx)
+		}
+
+		gotSpec := HasSpecialOrControlAVX2(data, ',')
+		wantSpec := HasSpecialOrControlSWAR(data, ',')
+		if gotSpec != wantSpec {
+			t.Fatalf("input %q: HasSpecialOrControlAVX2 = %v, want %v", s, gotSpec, wantSpec)
+		}
+
+		gotSpecIdx := IndexSpecialOrControlAVX2(data, ',')
+		wantSpecIdx := IndexSpecialOrControlSWAR(data, ',')
+		if gotSpecIdx != wantSpecIdx {
+			t.Fatalf("input %q: IndexSpecialOrControlAVX2 = %d, want %d", s, gotSpecIdx, wantSpecIdx)
+		}
+	}
+}
+
+func TestAVX2_Classifier_WideCharacterCorpora(t *testing.T) {
+	corpora := []string{
+		// English plain
+		"alphaNumericValue12345_Test_Identifier_Here",
+		// Latin extended
+		"Les naïfs méritent des récompenses pour leur créativité",
+		// Cyrillic
+		"Быстрая бурая лисица прыгает через ленивую собаку",
+		// CJK
+		"春眠不觉晓，处处闻啼鸟。夜来风雨声，花落知多少。",
+		// Japanese Kana & Kanji
+		"いろはにほへと ちりぬるを わかよたれそ つねならむ",
+		// Korean Hangul
+		"다람쥐 헌 쳇바퀴에 타고파. 무궁화 꽃이 피었습니다.",
+		// Greek
+		"Ξεσκεπάζω την ψυχοφθόρα βδελυγμία του καθωσπρεπισμού.",
+		// Arabic
+		"نص حكيم له سر قاطع وذو شأن عظيم مكتوب على ثوب أخضر ومذهب",
+		// Emojis & Symbols
+		"🚀✨🎉🔥🤖💡📦🛠️⚡💻🎯🏆",
+		// Long text spanning multiple 32-byte chunks (> 100 bytes)
+		"The quick brown fox jumps over the lazy dog. A large continuous text block designed to span multiple vector chunks.",
+	}
+
+	delims := []byte{',', '\t', '|', ';', 0}
+
+	for _, text := range corpora {
+		data := []byte(text)
+
+		// Base clean string should not require escaping or special quoting (no delim)
+		if HasEscapeOrControlAVX2(data) != HasEscapeOrControlScalar(data) {
+			t.Fatalf("corpora %q: HasEscapeOrControlAVX2 mismatch", text)
+		}
+		if HasSpecialOrControlAVX2(data, 0) != HasSpecialOrControlScalar(data, 0) {
+			t.Fatalf("corpora %q: HasSpecialOrControlAVX2 mismatch with delim 0", text)
+		}
+
+		// Inject special characters into every position of the corpora
+		specials := []byte{':', '\\', '"', '[', ']', '{', '}', '\n', '\r', '\t', '\x00'}
+		for _, sp := range specials {
+			for pos := 0; pos <= len(data); pos++ {
+				modified := make([]byte, 0, len(data)+1)
+				modified = append(modified, data[:pos]...)
+				modified = append(modified, sp)
+				modified = append(modified, data[pos:]...)
+
+				for _, delim := range delims {
+					wantSpecial := HasSpecialOrControlScalar(modified, delim)
+					gotSpecial := HasSpecialOrControlAVX2(modified, delim)
+					if wantSpecial != gotSpecial {
+						t.Fatalf("modified corpora (%q at pos %d, delim %q): got %v, want %v", sp, pos, delim, gotSpecial, wantSpecial)
+					}
+
+					wantSpecialIdx := IndexSpecialOrControlScalar(modified, delim)
+					gotSpecialIdx := IndexSpecialOrControlAVX2(modified, delim)
+					if wantSpecialIdx != gotSpecialIdx {
+						t.Fatalf("modified corpora (%q at pos %d, delim %q) index: got %d, want %d", sp, pos, delim, gotSpecialIdx, wantSpecialIdx)
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestAVX2_Classifier_DifferentialAgainstFormatNeedsQuoting(t *testing.T) {
+	// Tests that whenever NeedsQuotingAVX2 flags special/control/delim characters,
+	// format.NeedsQuoting agrees that quoting is needed.
+	testCases := []struct {
+		input string
+		delim byte
+	}{
+		{"normal", ','},
+		{"normal_value", ','},
+		{"with,comma", ','},
+		{"with:colon", ','},
+		{"with\\slash", ','},
+		{"with\"quote", ','},
+		{"with[bracket", ','},
+		{"with]bracket", ','},
+		{"with{brace", ','},
+		{"with}brace", ','},
+		{"with\nnewline", ','},
+		{"with\rcarriage", ','},
+		{"with\ttab", ','},
+		{"with\x01control", ','},
+		{"with|pipe", '|'},
+		{"with;semi", ';'},
+		{"long_clean_string_more_than_thirty_two_bytes_length", ','},
+		{"long_string_with_a_colon:inside_it_beyond_32_bytes", ','},
+		{"multibyte_chinese_世界_clean", ','},
+		{"multibyte_chinese_世界:has_colon", ','},
+		{"emoji_clean_🚀🌟", ','},
+		{"emoji_has_quote_🚀\"🌟", ','},
+	}
+
+	for _, tc := range testCases {
+		data := []byte(tc.input)
+		ctx := format.Context{InArray: true, Active: rune(tc.delim)}
+
+		gotAVX2 := NeedsQuotingAVX2(data, tc.delim)
+		gotSWAR := NeedsQuotingSWAR(data, tc.delim)
+		gotScalar := NeedsQuotingScalar(data, tc.delim)
+		wantQuoting := format.NeedsQuoting(tc.input, ctx)
+
+		if gotAVX2 != gotSWAR || gotAVX2 != gotScalar {
+			t.Fatalf("input %q (delim %q): AVX2=%v, SWAR=%v, Scalar=%v", tc.input, tc.delim, gotAVX2, gotSWAR, gotScalar)
+		}
+
+		// When AVX2 detects special/control/delim bytes, format.NeedsQuoting MUST be true
+		if gotAVX2 && !wantQuoting {
+			t.Fatalf("input %q (delim %q): NeedsQuotingAVX2 is true but format.NeedsQuoting is false", tc.input, tc.delim)
+		}
 	}
 }

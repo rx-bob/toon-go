@@ -115,13 +115,37 @@ func hasByte64(w uint64, b byte) uint64 {
 // HasEscapeOrControlAuto reports whether data contains an escape character ('\\')
 // or control character (< 0x20) using the optimal implementation for the host CPU.
 func HasEscapeOrControlAuto(data []byte) bool {
+	if HasAVX2() && HasBMI2() {
+		return HasEscapeOrControlAVX2(data)
+	}
 	return HasEscapeOrControlSWAR(data)
+}
+
+// IndexEscapeOrControlAuto returns the byte index of the first '\\' or < 0x20 character
+// using the optimal implementation for the host CPU.
+func IndexEscapeOrControlAuto(data []byte) int {
+	if HasAVX2() && HasBMI2() {
+		return IndexEscapeOrControlAVX2(data)
+	}
+	return IndexEscapeOrControlSWAR(data)
 }
 
 // HasSpecialOrControlAuto reports whether data contains a special or control character
 // using the optimal implementation for the host CPU.
 func HasSpecialOrControlAuto(data []byte, delim byte) bool {
+	if HasAVX2() && HasBMI2() {
+		return HasSpecialOrControlAVX2(data, delim)
+	}
 	return HasSpecialOrControlSWAR(data, delim)
+}
+
+// IndexSpecialOrControlAuto returns the byte index of the first special, control,
+// or delim byte using the optimal implementation for the host CPU.
+func IndexSpecialOrControlAuto(data []byte, delim byte) int {
+	if HasAVX2() && HasBMI2() {
+		return IndexSpecialOrControlAVX2(data, delim)
+	}
+	return IndexSpecialOrControlSWAR(data, delim)
 }
 
 // NeedsQuotingAuto reports whether data contains characters that require quoting in TOON.
